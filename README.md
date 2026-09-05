@@ -235,23 +235,6 @@ The model is instructed to answer **only from retrieved sections**. If the PDF n
 
 Deleting the source PDF on disk **does not** remove the document from Postgres. Query still works until you delete the `documents` row (`nodes` cascade via `ON DELETE CASCADE`) and rebuild indexes.
 
-## GitHub upload
-
-This repo’s `.gitignore` already excludes:
-
-- `.env` (tokens)
-- `rag/` and typical venv folders
-- `data/` (indexes and uploads)
-- `__pycache__/`
-
-Before the first push:
-
-```bash
-git add README.md .env.example requirements.txt app scripts .gitignore
-git status   # confirm .env and venv are not staged
-```
-
-Never commit Hugging Face or OpenAI keys.
 
 ## License
 
