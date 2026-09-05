@@ -126,12 +126,6 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-If `Activate.ps1` is blocked:
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
 **Linux / macOS**
 
 ```bash
