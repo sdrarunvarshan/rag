@@ -1,0 +1,12 @@
+docling
+txtai
+usearch
+rank-bm25
+fastapi
+uvicorn
+pydantic
+openai
+psycopg[binary]
+valkey
+python-multipart
+python-dotenv

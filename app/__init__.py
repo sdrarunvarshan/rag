@@ -1,0 +1,1 @@
+"""Chunkless / structured RAG application."""
