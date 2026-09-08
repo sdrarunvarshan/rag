@@ -75,6 +75,12 @@ Write a clear and complete answer in your own words."""
         text = (message.content or "").strip()
         if not text:
             text = (getattr(message, "reasoning", None) or "").strip()
+        if not text:
+            text = (
+                "I could not generate a clear answer from the retrieved sections. "
+                "The available context does not appear to contain a definition or explanation "
+                "for this question."
+            )    
         return text, False
     except Exception as exc:
         log.warning("Hugging Face generation failed: %s", exc)
