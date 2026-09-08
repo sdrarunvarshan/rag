@@ -70,7 +70,24 @@ def _format_tree(nodes: list[dict[str, Any]]) -> str:
         body = (node.get("text") or "").strip()
         blocks.append(title if not body else f"{title}\n{body}")
     return "\n\n".join(blocks).strip()
+    
+def build_context(sections: list[dict[str, Any]]) -> str:
+    """Clean, LLM-friendly context formatting."""
+    if not sections:
+        return ""
 
+    parts: list[str] = ["Here are the most relevant sections from the documents:\n"]
+
+    for i, item in enumerate(sections, 1):
+        heading = item.get("heading") or "Untitled Section"
+        page_info = f", page {item['page']}" if item.get("page") else ""
+        path_info = f" [{item['path']}]" if item.get("path") else ""
+
+        parts.append(f"=== Source {i}: {heading}{page_info}{path_info} ===")
+        parts.append((item.get("text") or "").strip())
+        parts.append("")  # blank line between sources
+
+    return "\n".join(parts).strip()
 
 def expand_section(node_id: UUID) -> dict[str, Any] | None:
     node = fetch_node(node_id)
@@ -140,9 +157,7 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
         if len(sections) >= TOP_SECTIONS:
             break
 
-    context = "\n\n---\n\n".join(
-        f"[{item['heading']}]\n{item['text']}" for item in sections
-    )
+        context = build_context(sections)
     payload = {
         "cached": False,
         "context": context,
