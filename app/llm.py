@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-
 from openai import OpenAI
 
 from app.config import (
@@ -17,11 +16,19 @@ from app.config import (
 
 log = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = (
-    "You answer questions using only the retrieved document sections. "
-    "Preserve structure: refer to headings and tables when relevant. "
-    "If the context is insufficient, say so clearly."
-)
+# Stronger system prompt for real generation
+SYSTEM_PROMPT = """You are a helpful assistant that answers questions using the provided document context.
+
+Rules:
+1. Base your answer ONLY on the retrieved sections. Do not use outside knowledge.
+2. Write a clear, natural, complete answer in your own words.
+3. Do NOT just copy or quote the retrieved text. Synthesize and explain.
+4. If the context contains a definition, explain it properly in a full paragraph.
+5. If the context is insufficient to answer, say so clearly and stop.
+6. Keep the answer concise but complete (usually 3–8 sentences).
+7. When useful, mention the relevant section heading.
+
+Never invent facts that are not supported by the context."""
 
 
 def _client() -> OpenAI:
@@ -47,17 +54,21 @@ def generate_answer(question: str, context: str) -> tuple[str, bool]:
     if not context.strip():
         return "No matching sections were retrieved for this question.", False
 
+    user_content = f"""Answer the following question using only the retrieved document sections below.
+
+Question:
+{question}
+
+Retrieved sections:
+{context}
+
+Write a clear and complete answer in your own words."""
+
     try:
         response = _chat(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Question:\n{question}\n\n"
-                        f"Retrieved sections:\n{context}"
-                    ),
-                },
+                {"role": "user", "content": user_content},
             ]
         )
         message = response.choices[0].message
