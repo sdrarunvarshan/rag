@@ -8,22 +8,31 @@ from uuid import UUID
 
 from app.cache import get_json, set_json
 from app.config import (
+    CONTEXT_CHAR_BUDGET,
+    MAX_CHILDREN,
+    MAX_SIBLINGS,
+    MAX_TABLES,
     OPENAI_MODEL,
     RERANK_CANDIDATES,
     RRF_K,
+    TABLE_RERANK_BONUS,
     TOP_K_BM25,
     TOP_K_VECTOR,
     TOP_SECTIONS,
 )
 from app.db import (
+    fetch_children,
     fetch_document,
     fetch_node,
-    fetch_subtree,
+    fetch_nodes_by_ids,
+    fetch_siblings,
+    fetch_tables_under,
     node_counts,
     summarize_nodes,
     tree_preview,
 )
 from app.index import hybrid_index
+from app.query_understand import understand_query
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +40,7 @@ log = logging.getLogger(__name__)
 def _cache_key(question: str, document_id: str | None) -> str:
     payload = json.dumps({"q": question, "d": document_id}, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return f"rag:flow:v2:{digest}"
+    return f"rag:flow:v3:{digest}"
 
 
 def reciprocal_rank_fusion(rank_lists: list[list[str]], k: int = RRF_K) -> list[tuple[str, float]]:
@@ -57,74 +66,202 @@ def _walk_to_section(node: dict[str, Any]) -> dict[str, Any]:
     return current
 
 
-def _format_tree(nodes: list[dict[str, Any]]) -> str:
-    blocks: list[str] = []
-    for node in nodes:
-        heading = node.get("heading") or node["node_type"].title()
-        page = node.get("page")
-        page_note = f" (p. {page})" if page else ""
-        kind = node["node_type"]
-        title = f"### {heading}{page_note}" if kind == "section" else f"#### {heading}{page_note}"
-        if kind == "table":
-            title = f"#### Table: {heading}{page_note}"
-        body = (node.get("text") or "").strip()
-        blocks.append(title if not body else f"{title}\n{body}")
-    return "\n\n".join(blocks).strip()
-    
-def build_context(sections: list[dict[str, Any]]) -> str:
-    """Clean, LLM-friendly context formatting."""
-    if not sections:
-        return ""
-
-    parts: list[str] = ["Here are the most relevant sections from the documents:\n"]
-
-    for i, item in enumerate(sections, 1):
-        heading = item.get("heading") or "Untitled Section"
-        page_info = f", page {item['page']}" if item.get("page") else ""
-        path_info = f" [{item['path']}]" if item.get("path") else ""
-
-        parts.append(f"=== Source {i}: {heading}{page_info}{path_info} ===")
-        parts.append((item.get("text") or "").strip())
-        parts.append("")  # blank line between sources
-
-    return "\n".join(parts).strip()
-
-def expand_section(node_id: UUID) -> dict[str, Any] | None:
-    node = fetch_node(node_id)
-    if node is None:
+def _brief(node: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not node:
         return None
-    root = _walk_to_section(node)
-    tree = fetch_subtree(root["id"])
     return {
-        "section_id": str(root["id"]),
-        "document_id": str(root["document_id"]),
-        "heading": root.get("heading") or "Section",
-        "node_type": root["node_type"],
-        "page": root.get("page"),
-        "path": root.get("path"),
-        "hit_node_id": str(node["id"]),
-        "hit_node_type": node["node_type"],
-        "text": _format_tree(tree),
+        "id": str(node["id"]),
+        "document_id": str(node["document_id"]),
+        "heading": node.get("heading") or node["node_type"].title(),
+        "node_type": node["node_type"],
+        "page": node.get("page"),
+        "path": node.get("path"),
+        "text": (node.get("text") or "").strip(),
+        "parent_id": str(node["parent_id"]) if node.get("parent_id") else None,
     }
 
 
-def _clip(text: str, limit: int = 4000) -> dict[str, Any]:
-    raw = text or ""
-    if len(raw) <= limit:
-        return {"text": raw, "truncated": False, "chars": len(raw)}
-    return {"text": raw[:limit] + "\n…", "truncated": True, "chars": len(raw)}
+def _briefs(nodes: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
+    items = [_brief(node) for node in nodes]
+    cleaned = [item for item in items if item]
+    if limit is not None:
+        return cleaned[:limit]
+    return cleaned
+
+
+def expand_hit(node_id: UUID, plan: dict[str, Any]) -> dict[str, Any] | None:
+    node = fetch_node(node_id)
+    if node is None:
+        return None
+    parent = _walk_to_section(node)
+    siblings = fetch_siblings(node, MAX_SIBLINGS) if plan.get("include_siblings") else []
+    children: list[dict[str, Any]] = []
+    if plan.get("include_children") or plan.get("prefer_tables"):
+        children = fetch_children(node["id"], MAX_CHILDREN)
+        if plan.get("prefer_tables"):
+            children = [child for child in children if child["node_type"] == "table"]
+        elif not plan.get("include_children"):
+            children = []
+    parent_brief = _brief(parent)
+    hit_brief = _brief(node)
+    return {
+        "section_id": str(parent["id"]),
+        "document_id": str(parent["document_id"]),
+        "heading": parent.get("heading") or "Section",
+        "node_type": parent["node_type"],
+        "page": parent.get("page"),
+        "path": parent.get("path"),
+        "hit_node_id": str(node["id"]),
+        "hit_node_type": node["node_type"],
+        "parent": parent_brief,
+        "hit": hit_brief,
+        "siblings": _briefs(siblings, MAX_SIBLINGS),
+        "children": _briefs(children, MAX_CHILDREN),
+        "text": (parent.get("text") or "").strip(),
+    }
+
+
+def retrieve_tables(
+    reranked: list[tuple[str, float]],
+    expansions: list[dict[str, Any]],
+    plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    table_ids: list[str] = []
+    seen: set[str] = set()
+
+    def add(node: dict[str, Any] | None) -> None:
+        if not node or node.get("node_type") != "table":
+            return
+        node_id = str(node["id"])
+        if node_id in seen:
+            return
+        seen.add(node_id)
+        table_ids.append(node_id)
+
+    rerank_uuids: list[UUID] = []
+    for node_id, _score in reranked:
+        try:
+            rerank_uuids.append(UUID(node_id))
+        except ValueError:
+            continue
+    for row in fetch_nodes_by_ids(rerank_uuids):
+        add(row)
+
+    root_ids = [UUID(item["section_id"]) for item in expansions]
+    for row in fetch_tables_under(root_ids, MAX_TABLES * 2):
+        add(row)
+
+    tables = _briefs(fetch_nodes_by_ids([UUID(nid) for nid in table_ids]), MAX_TABLES)
+    if plan.get("prefer_tables"):
+        return tables
+    return tables[:MAX_TABLES]
+
+
+def _block_text(role: str, node: dict[str, Any]) -> str:
+    labels = {
+        "parent": "Parent section",
+        "sibling": "Related section",
+        "child": "Subsection",
+        "hit": "Matched node",
+        "table": "Table",
+    }
+    heading = node.get("heading") or role.title()
+    page = f" (p. {node['page']})" if node.get("page") else ""
+    path = f" [{node['path']}]" if node.get("path") else ""
+    title = f"### {labels.get(role, role)}: {heading}{page}{path}"
+    body = (node.get("text") or "").strip()
+    return title if not body else f"{title}\n{body}"
+
+
+def organize_context(
+    plan: dict[str, Any],
+    expansions: list[dict[str, Any]],
+    tables: list[dict[str, Any]],
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+
+    def push(role: str, node: dict[str, Any] | None, priority: int) -> None:
+        if not node:
+            return
+        node_id = str(node.get("id") or "")
+        if not node_id or node_id in used_ids:
+            return
+        text = (node.get("text") or "").strip()
+        if not text and role != "parent":
+            return
+        used_ids.add(node_id)
+        candidates.append({"role": role, "priority": priority, "node": node})
+
+    parent_priority = 1 if plan.get("prefer_tables") else 0
+    table_priority = 0 if plan.get("prefer_tables") else 2
+    child_priority = 1 if not plan.get("prefer_tables") else 3
+    sibling_priority = 4 if plan.get("prefer_tables") else 3
+
+    for item in expansions:
+        if plan.get("include_parent"):
+            push("parent", item.get("parent"), parent_priority)
+        hit = item.get("hit")
+        if hit and hit.get("id") != (item.get("parent") or {}).get("id"):
+            role = "table" if hit.get("node_type") == "table" else "hit"
+            push(role, hit, table_priority if role == "table" else child_priority)
+        if plan.get("include_children"):
+            for child in item.get("children") or []:
+                role = "table" if child.get("node_type") == "table" else "child"
+                push(role, child, table_priority if role == "table" else child_priority)
+        if plan.get("include_siblings"):
+            for sibling in item.get("siblings") or []:
+                push("sibling", sibling, sibling_priority)
+
+    for table in tables:
+        push("table", table, table_priority)
+
+    candidates.sort(key=lambda item: (item["priority"],))
+    selected: list[dict[str, Any]] = []
+    parts: list[str] = [
+        "[Query]",
+        (
+            f"type={plan.get('query_type')} scope={plan.get('scope')} "
+            f"concepts={', '.join(plan.get('concepts') or []) or '(none)'}"
+        ),
+        "",
+    ]
+    used = len("\n".join(parts))
+    for item in candidates:
+        block = _block_text(item["role"], item["node"])
+        extra = len(block) + 2
+        if selected and used + extra > CONTEXT_CHAR_BUDGET:
+            continue
+        selected.append(
+            {
+                "role": item["role"],
+                "id": item["node"].get("id"),
+                "heading": item["node"].get("heading"),
+                "path": item["node"].get("path"),
+                "page": item["node"].get("page"),
+                "node_type": item["node"].get("node_type"),
+                "chars": len(item["node"].get("text") or ""),
+            }
+        )
+        parts.append(block)
+        parts.append("")
+        used += extra
+
+    text = "\n".join(parts).strip()
+    return {"text": text, "blocks": selected, "chars": len(text)}
 
 
 def retrieve(question: str, document_id: str | None = None, use_cache: bool = True) -> dict[str, Any]:
     key = _cache_key(question, document_id)
     if use_cache:
         cached = get_json(key)
-        if cached and "fused" in cached:
+        if cached and "fused" in cached and "query_plan" in cached:
             cached["cached"] = True
             return cached
 
+    plan = understand_query(question)
     vector_ids = hybrid_index.vector_search(question, TOP_K_VECTOR, document_id)
-    bm25_ids = hybrid_index.bm25_search(question, TOP_K_BM25, document_id)
+    bm25_ids = hybrid_index.bm25_search(plan["lexical_query"], TOP_K_BM25, document_id)
     fused = reciprocal_rank_fusion([vector_ids, bm25_ids])
     candidate_ids = [node_id for node_id, _score in fused[:RERANK_CANDIDATES]]
 
@@ -136,32 +273,45 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
             text = (row or {}).get("search_text") or ""
         texts.append(text)
     sim_scores = hybrid_index.similarity(question, texts)
-    reranked = sorted(
-        zip(candidate_ids, sim_scores),
-        key=lambda item: item[1],
-        reverse=True,
-    )
+    reranked = list(zip(candidate_ids, sim_scores))
+    if plan.get("prefer_tables") and reranked:
+        rows = {
+            str(row["id"]): row
+            for row in fetch_nodes_by_ids([UUID(nid) for nid in candidate_ids])
+        }
+        boosted: list[tuple[str, float]] = []
+        for node_id, score in reranked:
+            meta = rows.get(node_id)
+            if meta and meta.get("node_type") == "table":
+                score = float(score) + TABLE_RERANK_BONUS
+            boosted.append((node_id, float(score)))
+        reranked = boosted
+    reranked = sorted(reranked, key=lambda item: item[1], reverse=True)
 
-    sections: list[dict[str, Any]] = []
+    expansions: list[dict[str, Any]] = []
     seen_sections: set[str] = set()
     for node_id, score in reranked:
-        expanded = expand_section(UUID(node_id))
-        if not expanded or not expanded["text"]:
+        expanded = expand_hit(UUID(node_id), plan)
+        if not expanded:
             continue
         section_id = expanded["section_id"]
         if section_id in seen_sections:
             continue
         seen_sections.add(section_id)
         expanded["score"] = float(score)
-        sections.append(expanded)
-        if len(sections) >= TOP_SECTIONS:
+        expansions.append(expanded)
+        if len(expansions) >= TOP_SECTIONS:
             break
 
-        context = build_context(sections)
+    tables = retrieve_tables(reranked, expansions, plan)
+    packed = organize_context(plan, expansions, tables)
     payload = {
         "cached": False,
-        "context": context,
-        "sections": sections,
+        "query_plan": plan,
+        "context": packed["text"],
+        "structured": packed["blocks"],
+        "sections": expansions,
+        "tables": tables,
         "vector_hits": vector_ids,
         "bm25_hits": bm25_ids,
         "fused": [{"id": node_id, "rrf": score} for node_id, score in fused[:30]],
@@ -169,6 +319,27 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
     }
     set_json(key, {k: v for k, v in payload.items() if k != "cached"})
     return payload
+
+
+def _clip(text: str, limit: int = 4000) -> dict[str, Any]:
+    raw = text or ""
+    if len(raw) <= limit:
+        return {"text": raw, "truncated": False, "chars": len(raw)}
+    return {"text": raw[:limit] + "\n…", "truncated": True, "chars": len(raw)}
+
+
+def _relation_preview(items: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    preview = []
+    for item in items[:limit]:
+        preview.append(
+            {
+                "heading": item.get("heading"),
+                "path": item.get("path"),
+                "page": item.get("page"),
+                "node_type": item.get("node_type"),
+            }
+        )
+    return preview
 
 
 def build_query_flow(
@@ -202,16 +373,16 @@ def build_query_flow(
             found = summarize_nodes([item["id"]])
             meta = found[0] if found else {"id": item["id"]}
         rerank_rows.append({**meta, "score": item.get("score")})
-    section_payload = [
-        {
-            "heading": item["heading"],
-            "path": item.get("path"),
-            "page": item.get("page"),
-            "hit_node_type": item.get("hit_node_type"),
-            **_clip(item.get("text") or "", 3500),
-        }
-        for item in result.get("sections") or []
-    ]
+
+    expansions = result.get("sections") or []
+    parents = _relation_preview([item.get("parent") or item for item in expansions])
+    siblings: list[dict[str, Any]] = []
+    children: list[dict[str, Any]] = []
+    for item in expansions:
+        siblings.extend(_relation_preview(item.get("siblings") or []))
+        children.extend(_relation_preview(item.get("children") or []))
+    tables = _relation_preview(result.get("tables") or [])
+    plan = result.get("query_plan") or understand_query(question)
     context_clip = _clip(result.get("context") or "", 5000)
     doc_label = (doc_meta or {}).get("filename") if doc_meta else "All indexed documents"
     stages = [
@@ -244,6 +415,15 @@ def build_query_flow(
             "data": counts,
         },
         {
+            "key": "understand",
+            "title": "Query Understanding",
+            "summary": (
+                f"type={plan.get('query_type')} · scope={plan.get('scope')} · "
+                f"{len(plan.get('concepts') or [])} concepts"
+            ),
+            "data": plan,
+        },
+        {
             "key": "txtai",
             "title": "txtai Embeddings + Vector Search",
             "summary": f"{len(vector_rows)} vector hits (USearch)",
@@ -253,7 +433,7 @@ def build_query_flow(
             "key": "bm25",
             "title": "BM25 Search",
             "summary": f"{len(bm25_rows)} lexical hits",
-            "data": {"hits": bm25_rows[:12]},
+            "data": {"hits": bm25_rows[:12], "lexical_query": plan.get("lexical_query")},
         },
         {
             "key": "hybrid",
@@ -268,21 +448,40 @@ def build_query_flow(
             "data": {"ranked": rerank_rows[:12]},
         },
         {
-            "key": "section",
-            "title": "Retrieve Full Section",
-            "summary": f"Expanded {len(section_payload)} parent sections (with child tables)",
-            "data": {"sections": section_payload},
+            "key": "hierarchy",
+            "title": "Hierarchical Expansion",
+            "summary": (
+                f"{len(parents)} parents · {len(siblings)} siblings · "
+                f"{len(children)} children"
+            ),
+            "data": {
+                "parent": parents,
+                "siblings": siblings[:12],
+                "children": children[:12],
+            },
+        },
+        {
+            "key": "tables",
+            "title": "Table Retrieval",
+            "summary": f"{len(tables)} tables packed for grounding",
+            "data": {"tables": tables},
         },
         {
             "key": "context",
-            "title": "Context Building",
-            "summary": f"{context_clip['chars']} characters assembled for the LLM",
-            "data": context_clip,
+            "title": "Context Organizer",
+            "summary": (
+                f"{len(result.get('structured') or [])} blocks · "
+                f"{context_clip['chars']} characters"
+            ),
+            "data": {
+                **context_clip,
+                "blocks": result.get("structured") or [],
+            },
         },
         {
             "key": "llm",
-            "title": "LLM",
-            "summary": (answer[:180] if llm_skipped else f"Generated with {OPENAI_MODEL}"),
+            "title": "Qwen",
+            "summary": (answer[:180] if llm_skipped else f"Grounded answer with {OPENAI_MODEL}"),
             "data": {"answer": answer, "skipped": llm_skipped},
         },
     ]

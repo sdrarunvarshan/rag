@@ -2,7 +2,11 @@
 
 PDF documents are parsed with **Docling** into a heading / table tree and indexed at **section, subsection, and table** granularity. There is no fixed-size token chunking.
 
-Retrieval is hybrid (**txtai + USearch** vectors and **BM25**), fused with Reciprocal Rank Fusion, reranked, then expanded to the **full parent section** (including child tables). Answers are generated with **Qwen** through Hugging Face’s OpenAI-compatible Inference Router.
+At query time, the pipeline runs **query understanding → hybrid retrieval → RRF fusion → reranking → hierarchical expansion → table retrieval → context organization → Qwen generation**. Every stage is implemented in this repo and exposed in the `/query` response `flow` field.
+
+## Architecture
+
+### Ingest (offline)
 
 ```
 Documents
@@ -13,34 +17,69 @@ Structured Document Tree
    ↓
 Sections / Subsections / Tables
    ↓
-        txtai
-   ┌───────────────┐
-   │ Embeddings    │
-   │ Vector Search │
-   └───────────────┘
-          ↓
-     BM25 Search
-          ↓
-   Hybrid Retrieval (RRF)
-          ↓
-      Reranking
-          ↓
-   Retrieve Full Section
-          ↓
-    Context Building
-          ↓
-   LLM (Hugging Face / Qwen)
+PostgreSQL (source of truth) + txtai/USearch vectors + BM25 index
 ```
+
+### Query (online)
+
+```
+USER QUESTION
+       ↓
+Query Understanding                    app/query_understand.py
+       ↓
+Query Type + Scope + Concepts          definition | comparison | numeric | …
+       ↓
+┌──────────────┴──────────────┐
+↓                             ↓
+Dense Retrieval               BM25
+txtai + USearch               lexical (rank-bm25)
+app/index.py                  app/index.py
+└──────────────┬──────────────┘
+       ↓
+RRF Fusion                             app/retrieve.py
+       ↓
+Reranker                               embedding similarity (+ table boost)
+       ↓
+Hierarchical Expansion
+   ↙      ↓       ↘
+Parent  Sibling  Children              app/retrieve.py (expand_hit)
+       ↓
+Table Retrieval                        app/retrieve.py (retrieve_tables)
+       ↓
+Context Organizer                      app/retrieve.py (organize_context)
+       ↓
+Structured Context                     labeled blocks within char budget
+       ↓
+Qwen                                   app/llm.py (Hugging Face router)
+       ↓
+Grounded Answer
+```
+
+| Stage | What it does | Code |
+| --- | --- | --- |
+| Query Understanding | Classifies query type, scope, concepts; sets expansion flags | `app/query_understand.py` |
+| Dense + BM25 | Parallel vector and lexical search over indexed nodes | `app/index.py` |
+| RRF Fusion | Reciprocal Rank Fusion merges rank lists | `app/retrieve.py` |
+| Reranker | Re-scores fused candidates with embedding similarity | `app/retrieve.py` |
+| Hierarchical Expansion | Walks hit → parent section; adds siblings and children per plan | `app/retrieve.py` |
+| Table Retrieval | Pulls table nodes from hits and expanded sections | `app/retrieve.py` |
+| Context Organizer | Orders blocks (parent / sibling / child / table) into structured context | `app/retrieve.py` |
+| Qwen | Grounded generation from structured context only | `app/llm.py` |
+
+The web UI and API return a `flow` object with one entry per stage so you can inspect hits, fusion scores, expansions, and the final context.
 
 ## Features
 
 - Structure-aware ingest (headings and tables, not sliding-window chunks)
+- Query understanding (type, scope, concepts) drives expansion and BM25 query shaping
 - PostgreSQL as the source of truth for document trees
-- Hybrid search: dense (txtai / USearch) + lexical (BM25)
+- Hybrid search: dense (txtai / USearch) + lexical (BM25), fused with RRF
+- Hierarchical expansion: parent section, siblings, children, and dedicated table retrieval
+- Context organizer packs labeled blocks under a character budget
 - Query `flow` payload so each pipeline stage is visible in the API response
 - Optional `document_id` filter
 - Valkey / Redis cache for retrieval results
-- LLM via Hugging Face router (`https://router.huggingface.co/v1`)
+- LLM via Hugging Face router (`https://router.huggingface.co/v1`), default model **Qwen**
 
 ## Stack
 
@@ -58,15 +97,16 @@ Sections / Subsections / Tables
 
 ```
 app/
-  main.py          FastAPI routes: /, /health, /documents, /ingest, /query
-  ingest.py        Docling PDF → structured nodes
-  db.py            Postgres schema and queries
-  index.py         txtai + BM25 index
-  usearch_ann.py   USearch backend for txtai
-  retrieve.py      Hybrid search, rerank, section expand, flow
-  llm.py           Hugging Face OpenAI-compatible chat
-  cache.py         Valkey
-  config.py        Environment
+  main.py              FastAPI routes: /, /health, /documents, /ingest, /query
+  ingest.py            Docling PDF → structured nodes
+  query_understand.py  Query type, scope, concepts, expansion plan
+  db.py                Postgres schema and queries
+  index.py             txtai + BM25 index
+  usearch_ann.py       USearch backend for txtai
+  retrieve.py          Hybrid search, RRF, rerank, hierarchy, tables, context, flow
+  llm.py               Hugging Face OpenAI-compatible chat (Qwen)
+  cache.py             Valkey
+  config.py            Environment
 scripts/
   ingest_pdf.py    CLI ingest
   check_services.py  Postgres / Valkey ping
@@ -210,10 +250,12 @@ curl -X POST http://127.0.0.1:8000/query \
 
 Response fields:
 
-- `answer` — LLM output (or a skip/error message)
-- `sources` — expanded sections used as context
-- `context` — text sent to the model
-- `flow` — stage-by-stage pipeline trace
+- `answer` — grounded LLM output (or a skip/error message)
+- `query_plan` — query type, scope, concepts, and expansion flags from query understanding
+- `sources` — expanded sections (parent / siblings / children) used as context
+- `structured` — ordered context blocks with role labels (parent, sibling, child, table, hit)
+- `context` — structured text sent to Qwen
+- `flow` — stage-by-stage pipeline trace (understand → txtai → bm25 → hybrid → rerank → hierarchy → tables → context → llm)
 - `llm_skipped` — `true` if generation was skipped or failed
 
 The model is instructed to answer **only from retrieved sections**. If the PDF never defines a term, the answer will say the context is insufficient instead of inventing a definition.

@@ -313,6 +313,12 @@ def ingest_flow(
             "data": counts,
         },
         {
+            "key": "understand",
+            "title": "Query Understanding",
+            "summary": "Runs on query (type, scope, concepts).",
+            "data": None,
+        },
+        {
             "key": "txtai",
             "title": "txtai Embeddings + Vector Search",
             "summary": f"Indexed {counts.get('total', 0)} nodes (USearch). Vector search runs on query.",
@@ -337,21 +343,27 @@ def ingest_flow(
             "data": None,
         },
         {
-            "key": "section",
-            "title": "Retrieve Full Section",
-            "summary": "Runs on query (expand to parent section + tables).",
+            "key": "hierarchy",
+            "title": "Hierarchical Expansion",
+            "summary": "Runs on query (parent, sibling, children).",
+            "data": None,
+        },
+        {
+            "key": "tables",
+            "title": "Table Retrieval",
+            "summary": "Runs on query (tables under expanded parents).",
             "data": None,
         },
         {
             "key": "context",
-            "title": "Context Building",
-            "summary": "Runs on query.",
+            "title": "Context Organizer",
+            "summary": "Runs on query (structured blocks for Qwen).",
             "data": None,
         },
         {
             "key": "llm",
-            "title": "LLM",
-            "summary": "Runs on query.",
+            "title": "Qwen",
+            "summary": "Runs on query (grounded answer).",
             "data": None,
         },
     ]

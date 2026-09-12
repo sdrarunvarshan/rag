@@ -16,17 +16,22 @@ from app.config import (
 
 log = logging.getLogger(__name__)
 
-# Stronger system prompt for real generation
-SYSTEM_PROMPT = """You are a helpful assistant that answers questions using the provided document context.
+SYSTEM_PROMPT = """You are a helpful assistant that answers questions using structured retrieved context.
+
+The context is labeled:
+- Parent section: containing heading and its own prose
+- Related section: sibling headings
+- Subsection / Matched node: children of the hit
+- Table: markdown tables
 
 Rules:
-1. Base your answer ONLY on the retrieved sections. Do not use outside knowledge.
+1. Base your answer ONLY on the retrieved blocks. Do not use outside knowledge.
 2. Write a clear, natural, complete answer in your own words.
-3. Do NOT just copy or quote the retrieved text. Synthesize and explain.
-4. If the context contains a definition, explain it properly in a full paragraph.
-5. If the context is insufficient to answer, say so clearly and stop.
-6. Keep the answer concise but complete (usually 3–8 sentences).
-7. When useful, mention the relevant section heading.
+3. Cite the section heading and page when you use a fact.
+4. If a number, rate, or list comes from a Table block, name that table.
+5. Prefer parent/child prose for explanations; use tables for figures.
+6. If the context is insufficient, say so clearly and stop.
+7. Keep the answer concise but complete (usually 3–8 sentences).
 
 Never invent facts that are not supported by the context."""
 
@@ -48,21 +53,31 @@ def _chat(messages: list[dict], extra_body: dict | None = None):
     )
 
 
-def generate_answer(question: str, context: str) -> tuple[str, bool]:
+def generate_answer(
+    question: str,
+    context: str,
+    query_plan: dict | None = None,
+) -> tuple[str, bool]:
     if not LLM_API_KEY:
         return "LLM skipped: set HF_TOKEN in .env", True
     if not context.strip():
         return "No matching sections were retrieved for this question.", False
 
-    user_content = f"""Answer the following question using only the retrieved document sections below.
+    plan = query_plan or {}
+    plan_line = (
+        f"Query type: {plan.get('query_type', 'general')}. "
+        f"Scope: {plan.get('scope', 'hierarchical')}."
+    )
+    user_content = f"""Answer the following question using only the structured context below.
+{plan_line}
 
 Question:
 {question}
 
-Retrieved sections:
+Structured context:
 {context}
 
-Write a clear and complete answer in your own words."""
+Write a grounded answer. Cite headings/pages (and tables when numbers come from them)."""
 
     try:
         response = _chat(
@@ -80,7 +95,7 @@ Write a clear and complete answer in your own words."""
                 "I could not generate a clear answer from the retrieved sections. "
                 "The available context does not appear to contain a definition or explanation "
                 "for this question."
-            )    
+            )
         return text, False
     except Exception as exc:
         log.warning("Hugging Face generation failed: %s", exc)

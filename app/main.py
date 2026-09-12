@@ -58,10 +58,17 @@ class QueryResponse(BaseModel):
     context: str
     flow: dict[str, dict]
     llm_skipped: bool = False
+    query_plan: dict = Field(default_factory=dict)
+    structured: list[dict] = Field(default_factory=list)
 
 
 @app.get("/")
 def home():
+    if not UI_PAGE.is_file():
+        raise HTTPException(
+            status_code=500,
+            detail="UI file missing: app/templates/index.html. API docs are at /docs",
+        )
     return FileResponse(UI_PAGE, media_type="text/html")
 
 
@@ -116,7 +123,11 @@ def query(body: QueryRequest) -> QueryResponse:
         if not db.document_exists(doc_uuid):
             raise HTTPException(status_code=404, detail="document_id not found")
     result = retrieve(body.question, document_id)
-    answer, llm_skipped = generate_answer(body.question, result["context"])
+    answer, llm_skipped = generate_answer(
+        body.question,
+        result["context"],
+        result.get("query_plan"),
+    )
     sources = [
         {
             "section_id": item["section_id"],
@@ -128,9 +139,25 @@ def query(body: QueryRequest) -> QueryResponse:
             "hit_node_id": item["hit_node_id"],
             "hit_node_type": item["hit_node_type"],
             "score": item.get("score"),
+            "role": "section",
         }
         for item in result["sections"]
     ]
+    for table in result.get("tables") or []:
+        sources.append(
+            {
+                "section_id": table.get("id"),
+                "document_id": table.get("document_id"),
+                "heading": table.get("heading"),
+                "node_type": "table",
+                "page": table.get("page"),
+                "path": table.get("path"),
+                "hit_node_id": table.get("id"),
+                "hit_node_type": "table",
+                "score": None,
+                "role": "table",
+            }
+        )
     flow = build_query_flow(body.question, document_id, result, answer, llm_skipped)
     return QueryResponse(
         answer=answer,
@@ -139,4 +166,6 @@ def query(body: QueryRequest) -> QueryResponse:
         context=result["context"],
         flow=flow,
         llm_skipped=llm_skipped,
+        query_plan=result.get("query_plan") or {},
+        structured=result.get("structured") or [],
     )

@@ -213,6 +213,73 @@ def fetch_node(node_id: UUID) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def fetch_children(
+    parent_id: UUID,
+    limit: int = 32,
+    node_type: str | None = None,
+) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM nodes WHERE parent_id = %s"
+    params: list[Any] = [parent_id]
+    if node_type:
+        sql += " AND node_type = %s"
+        params.append(node_type)
+    sql += " ORDER BY path NULLS LAST, id LIMIT %s"
+    params.append(limit)
+    with connect() as conn:
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    return list(rows)
+
+
+def fetch_siblings(node: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+    node_id = node["id"]
+    parent_id = node.get("parent_id")
+    with connect() as conn:
+        if parent_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM nodes
+                WHERE parent_id = %s AND id <> %s
+                ORDER BY path NULLS LAST, id
+                LIMIT %s
+                """,
+                (parent_id, node_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM nodes
+                WHERE parent_id IS NULL AND document_id = %s AND id <> %s
+                ORDER BY path NULLS LAST, id
+                LIMIT %s
+                """,
+                (node["document_id"], node_id, limit),
+            ).fetchall()
+    return list(rows)
+
+
+def fetch_tables_under(root_ids: list[UUID], limit: int = 24) -> list[dict[str, Any]]:
+    if not root_ids:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            WITH RECURSIVE tree AS (
+                SELECT * FROM nodes WHERE id = ANY(%s)
+                UNION
+                SELECT n.*
+                FROM nodes n
+                INNER JOIN tree t ON n.parent_id = t.id
+            )
+            SELECT * FROM tree
+            WHERE node_type = 'table'
+            ORDER BY path NULLS LAST, id
+            LIMIT %s
+            """,
+            (root_ids, limit),
+        ).fetchall()
+    return list(rows)
+
+
 def fetch_subtree(root_id: UUID) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(

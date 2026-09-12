@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chunkless Structured RAG</title>
+  <style>
+    :root {
+      --bg: #f4f1ea;
+      --paper: #fffdf8;
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #d6d3d1;
+      --accent: #0f766e;
+      --accent-2: #134e4a;
+      --warn: #b45309;
+      --stage: #ecfdf5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    header {
+      padding: 1.25rem 1.5rem 0.5rem;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    header h1 { margin: 0 0 0.35rem; font-size: 1.45rem; }
+    header p { margin: 0; color: var(--muted); max-width: 46rem; }
+    header a { color: var(--accent-2); }
+    .layout {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 1rem 1.5rem 3rem;
+      display: grid;
+      gap: 1.25rem;
+    }
+    .panel {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 1rem 1.1rem;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.25rem; }
+    input[type="file"], input[type="text"], select, textarea {
+      width: 100%;
+      padding: 0.5rem 0.6rem;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font: inherit;
+      background: #fff;
+    }
+    textarea { min-height: 4.5rem; resize: vertical; }
+    .grow { flex: 1; min-width: 220px; }
+    button {
+      background: var(--accent);
+      color: white;
+      border: 0;
+      border-radius: 8px;
+      padding: 0.55rem 1rem;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    button.secondary { background: var(--accent-2); }
+    .status { font-size: 0.85rem; color: var(--muted); margin-top: 0.6rem; white-space: pre-wrap; }
+    .status.error { color: #b91c1c; }
+    .pipeline { display: flex; flex-direction: column; align-items: stretch; }
+    .stage {
+      background: var(--stage);
+      border: 1px solid #99f6e4;
+      border-radius: 10px;
+      padding: 0.75rem 0.9rem;
+    }
+    .stage.empty { background: #fafaf9; border-color: var(--line); }
+    .stage.llm { background: #fff7ed; border-color: #fdba74; }
+    .stage h3 { margin: 0 0 0.2rem; font-size: 0.95rem; }
+    .stage .summary { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.45rem; }
+    .stage pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 0.78rem;
+      max-height: 220px;
+      overflow: auto;
+      background: rgba(255,255,255,0.7);
+      padding: 0.5rem;
+      border-radius: 6px;
+    }
+    .arrow {
+      text-align: center;
+      color: var(--accent);
+      font-size: 1.1rem;
+      line-height: 1.4;
+      user-select: none;
+    }
+    .counts { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .chip {
+      background: #ccfbf1;
+      border-radius: 999px;
+      padding: 0.2rem 0.65rem;
+      font-size: 0.8rem;
+    }
+    .answer {
+      font-size: 1rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Chunkless / structured RAG</h1>
+    <p>
+      Documents are parsed with Docling into a heading and table tree, then retrieved as
+      parent / sibling / child sections plus tables. API docs:
+      <a href="/docs">/docs</a>
+    </p>
+  </header>
+  <div class="layout">
+    <section class="panel">
+      <div class="row">
+        <div class="grow">
+          <label for="pdf">Upload PDF</label>
+          <input id="pdf" type="file" accept="application/pdf,.pdf" />
+        </div>
+        <button id="ingestBtn" type="button">Ingest</button>
+      </div>
+      <div class="row" style="margin-top:0.85rem">
+        <div class="grow">
+          <label for="docSelect">Document (optional filter)</label>
+          <select id="docSelect">
+            <option value="">All documents</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:0.85rem">
+        <div class="grow">
+          <label for="question">Question</label>
+          <textarea id="question" placeholder="Ask about a section, definition, or table"></textarea>
+        </div>
+        <button id="queryBtn" class="secondary" type="button">Run query</button>
+      </div>
+      <div id="status" class="status"></div>
+      <div id="counts" class="counts"></div>
+    </section>
+
+    <section class="panel">
+      <h2 style="margin:0 0 0.75rem; font-size:1.05rem">Pipeline</h2>
+      <div id="pipeline" class="pipeline"></div>
+    </section>
+  </div>
+  <script>
+    const STAGES = [
+      ["documents", "Documents"],
+      ["docling", "Docling"],
+      ["tree", "Structured Document Tree"],
+      ["structure", "Sections / Subsections / Tables"],
+      ["understand", "Query Understanding"],
+      ["txtai", "txtai Embeddings + Vector Search"],
+      ["bm25", "BM25 Search"],
+      ["hybrid", "Hybrid Retrieval"],
+      ["rerank", "Reranking"],
+      ["hierarchy", "Hierarchical Expansion"],
+      ["tables", "Table Retrieval"],
+      ["context", "Context Organizer"],
+      ["llm", "Qwen"],
+    ];
+
+    function normalizeFlow(flow) {
+      if (!flow) return {};
+      if (Array.isArray(flow)) {
+        const byKey = {};
+        flow.forEach((s) => { byKey[s.key] = s; });
+        return byKey;
+      }
+      return flow;
+    }
+
+    function renderPipeline(flow) {
+      const root = document.getElementById("pipeline");
+      const byKey = normalizeFlow(flow);
+      root.innerHTML = "";
+      STAGES.forEach(([key, title], i) => {
+        const stage = byKey[key];
+        const el = document.createElement("div");
+        el.className = "stage" + (stage && stage.data != null ? "" : " empty") + (key === "llm" ? " llm" : "");
+        const summary = stage?.summary || "Waiting for ingest or query…";
+        let body = "";
+        if (key === "llm" && stage?.data?.answer) {
+          body = `<div class="answer">${escapeHtml(stage.data.answer)}</div>`;
+        } else if (stage?.data != null) {
+          body = `<pre>${escapeHtml(formatData(stage.data))}</pre>`;
+        }
+        el.innerHTML = `<h3>${title}</h3><div class="summary">${escapeHtml(summary)}</div>${body}`;
+        root.appendChild(el);
+        if (i < STAGES.length - 1) {
+          const arrow = document.createElement("div");
+          arrow.className = "arrow";
+          arrow.textContent = "↓";
+          root.appendChild(arrow);
+        }
+      });
+    }
+
+    function formatNodes(items, label) {
+      if (!items || !items.length) return "";
+      const lines = items.map(formatHit);
+      return label ? `${label}\n${lines.join("\n")}` : lines.join("\n");
+    }
+
+    function formatData(data) {
+      if (data == null) return "";
+      if (typeof data === "string") return data;
+      if (data.text) return data.text;
+      if (Array.isArray(data.preview)) return data.preview.join("\n");
+      if (data.hits) return data.hits.map(formatHit).join("\n");
+      if (data.fused) return data.fused.map((h) => formatHit(h) + (h.rrf != null ? `  rrf=${Number(h.rrf).toFixed(4)}` : "")).join("\n");
+      if (data.ranked) return data.ranked.map((h) => formatHit(h) + (h.score != null ? `  score=${Number(h.score).toFixed(4)}` : "")).join("\n");
+      if (data.sections) {
+        return data.sections.map((s) => `# ${s.heading || ""}\n${s.text || ""}`).join("\n\n---\n\n");
+      }
+      if (data.parent || data.siblings || data.children) {
+        return [
+          formatNodes(data.parent, "Parent"),
+          formatNodes(data.siblings, "Siblings"),
+          formatNodes(data.children, "Children"),
+        ].filter(Boolean).join("\n\n");
+      }
+      if (data.tables) return data.tables.map(formatHit).join("\n");
+      if (data.blocks) {
+        return data.blocks.map((b) => `[${b.role}] ${b.heading || ""} ${b.path || ""}`).join("\n");
+      }
+      if (data.query_type) {
+        return [
+          `type=${data.query_type}`,
+          `scope=${data.scope}`,
+          `concepts=${(data.concepts || []).join(", ")}`,
+          `lexical=${data.lexical_query || ""}`,
+        ].join("\n");
+      }
+      return JSON.stringify(data, null, 2);
+    }
+
+    function formatHit(h) {
+      const heading = h.heading || h.id || "";
+      const kind = h.node_type ? `[${h.node_type}] ` : "";
+      const page = h.page != null ? ` p.${h.page}` : "";
+      return `${kind}${heading}${page}`;
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function setStatus(msg, isError) {
+      const el = document.getElementById("status");
+      el.textContent = msg;
+      el.className = "status" + (isError ? " error" : "");
+    }
+
+    function showCounts(counts) {
+      const el = document.getElementById("counts");
+      if (!counts) { el.innerHTML = ""; return; }
+      el.innerHTML = ["section", "subsection", "table", "total"]
+        .filter((k) => counts[k] != null)
+        .map((k) => `<span class="chip">${k}: ${counts[k]}</span>`)
+        .join("");
+    }
+
+    async function loadDocuments(selected) {
+      const res = await fetch("/documents");
+      if (!res.ok) {
+        setStatus("Could not load documents from Postgres.", true);
+        return;
+      }
+      const data = await res.json();
+      const sel = document.getElementById("docSelect");
+      const current = selected || sel.value;
+      sel.innerHTML = '<option value="">All documents</option>';
+      (data.documents || []).forEach((d) => {
+        const opt = document.createElement("option");
+        opt.value = d.id;
+        opt.textContent = d.filename;
+        sel.appendChild(opt);
+      });
+      if (current) sel.value = current;
+    }
+
+    document.getElementById("ingestBtn").onclick = async () => {
+      const file = document.getElementById("pdf").files[0];
+      if (!file) { setStatus("Choose a PDF first.", true); return; }
+      const btn = document.getElementById("ingestBtn");
+      btn.disabled = true;
+      setStatus("Ingesting with Docling (this can take several minutes for a book)…");
+      const body = new FormData();
+      body.append("file", file);
+      try {
+        const res = await fetch("/ingest", { method: "POST", body });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        setStatus("Ingested " + data.filename + "\ndocument_id=" + data.document_id);
+        showCounts(data.counts);
+        renderPipeline(data.flow);
+        await loadDocuments(data.document_id);
+      } catch (err) {
+        setStatus(String(err), true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    document.getElementById("queryBtn").onclick = async () => {
+      const question = document.getElementById("question").value.trim();
+      if (!question) { setStatus("Enter a question.", true); return; }
+      const btn = document.getElementById("queryBtn");
+      btn.disabled = true;
+      setStatus("Running hybrid retrieval…");
+      try {
+        const document_id = document.getElementById("docSelect").value || null;
+        const res = await fetch("/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question, document_id }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        setStatus(data.llm_skipped ? "Retrieval complete. LLM skipped." : "Query complete.");
+        renderPipeline(data.flow);
+      } catch (err) {
+        setStatus(String(err), true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    renderPipeline({});
+    loadDocuments();
+  </script>
+</body>
+</html>

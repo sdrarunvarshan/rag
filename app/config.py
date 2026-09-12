@@ -43,6 +43,11 @@ TOP_K_BM25 = int(os.getenv("TOP_K_BM25", "20"))
 RRF_K = int(os.getenv("RRF_K", "60"))
 RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "15"))
 TOP_SECTIONS = int(os.getenv("TOP_SECTIONS", "4"))
+MAX_SIBLINGS = int(os.getenv("MAX_SIBLINGS", "2"))
+MAX_CHILDREN = int(os.getenv("MAX_CHILDREN", "8"))
+MAX_TABLES = int(os.getenv("MAX_TABLES", "6"))
+CONTEXT_CHAR_BUDGET = int(os.getenv("CONTEXT_CHAR_BUDGET", "12000"))
+TABLE_RERANK_BONUS = float(os.getenv("TABLE_RERANK_BONUS", "0.15"))
 
 
 def ensure_data_dirs() -> None:
