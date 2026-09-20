@@ -34,7 +34,6 @@ LLM_TOP_K = int(os.getenv("LLM_TOP_K", "20"))
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
 
 DATA_DIR = ROOT / "data"
-TXTAI_DIR = DATA_DIR / "txtai"
 BM25_PATH = DATA_DIR / "bm25.pkl"
 UPLOAD_DIR = DATA_DIR / "uploads"
 
@@ -53,4 +52,3 @@ TABLE_RERANK_BONUS = float(os.getenv("TABLE_RERANK_BONUS", "0.15"))
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    TXTAI_DIR.mkdir(parents=True, exist_ok=True)

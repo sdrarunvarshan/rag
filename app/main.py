@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 from contextlib import asynccontextmanager
@@ -7,15 +8,14 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import cache, db
 from app.config import UPLOAD_DIR, ensure_data_dirs
 from app.index import hybrid_index
 from app.ingest import ingest_pdf
-from app.llm import generate_answer
-from app.retrieve import build_query_flow, retrieve
+from app.langgraph_rag import run_rag_pipeline, stream_rag_pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -110,62 +110,34 @@ async def ingest(file: UploadFile = File(...)) -> dict:
     return result
 
 
+def _resolved_document_id(document_id: str | None) -> str | None:
+    if not document_id:
+        return None
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
+    if not db.document_exists(doc_uuid):
+        raise HTTPException(status_code=404, detail="document_id not found")
+    return document_id
+
+
 @app.post("/query", response_model=QueryResponse)
 def query(body: QueryRequest) -> QueryResponse:
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
-    document_id = body.document_id
-    if document_id:
-        try:
-            doc_uuid = UUID(document_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
-        if not db.document_exists(doc_uuid):
-            raise HTTPException(status_code=404, detail="document_id not found")
-    result = retrieve(body.question, document_id)
-    answer, llm_skipped = generate_answer(
-        body.question,
-        result["context"],
-        result.get("query_plan"),
-    )
-    sources = [
-        {
-            "section_id": item["section_id"],
-            "document_id": item["document_id"],
-            "heading": item["heading"],
-            "node_type": item["node_type"],
-            "page": item["page"],
-            "path": item["path"],
-            "hit_node_id": item["hit_node_id"],
-            "hit_node_type": item["hit_node_type"],
-            "score": item.get("score"),
-            "role": "section",
-        }
-        for item in result["sections"]
-    ]
-    for table in result.get("tables") or []:
-        sources.append(
-            {
-                "section_id": table.get("id"),
-                "document_id": table.get("document_id"),
-                "heading": table.get("heading"),
-                "node_type": "table",
-                "page": table.get("page"),
-                "path": table.get("path"),
-                "hit_node_id": table.get("id"),
-                "hit_node_type": "table",
-                "score": None,
-                "role": "table",
-            }
-        )
-    flow = build_query_flow(body.question, document_id, result, answer, llm_skipped)
-    return QueryResponse(
-        answer=answer,
-        cached=bool(result.get("cached")),
-        sources=sources,
-        context=result["context"],
-        flow=flow,
-        llm_skipped=llm_skipped,
-        query_plan=result.get("query_plan") or {},
-        structured=result.get("structured") or [],
-    )
+    packed = run_rag_pipeline(body.question, _resolved_document_id(body.document_id))
+    return QueryResponse(**packed)
+
+
+@app.post("/query/stream")
+def query_stream(body: QueryRequest) -> StreamingResponse:
+    if not db.ping():
+        raise HTTPException(status_code=503, detail="Postgres is not reachable")
+    document_id = _resolved_document_id(body.document_id)
+
+    def events():
+        for item in stream_rag_pipeline(body.question, document_id):
+            yield f"data: {json.dumps(item, default=str)}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")

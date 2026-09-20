@@ -319,10 +319,10 @@ def ingest_flow(
             "data": None,
         },
         {
-            "key": "txtai",
-            "title": "txtai Embeddings + Vector Search",
-            "summary": f"Indexed {counts.get('total', 0)} nodes (USearch). Vector search runs on query.",
-            "data": {"indexed": counts.get("total", 0), "backend": "usearch"},
+            "key": "vector",
+            "title": "pgvector + Sentence-Transformers",
+            "summary": f"Indexed {counts.get('total', 0)} nodes (pgvector). Vector search runs on query.",
+            "data": {"indexed": counts.get("total", 0), "backend": "pgvector"},
         },
         {
             "key": "bm25",
@@ -361,9 +361,15 @@ def ingest_flow(
             "data": None,
         },
         {
+            "key": "graph",
+            "title": "LangGraph",
+            "summary": "Runs on query (retrieve → generate).",
+            "data": None,
+        },
+        {
             "key": "llm",
-            "title": "Qwen",
-            "summary": "Runs on query (grounded answer).",
+            "title": "LangChain + Qwen",
+            "summary": "Runs on query (grounded answer via Hugging Face).",
             "data": None,
         },
     ]

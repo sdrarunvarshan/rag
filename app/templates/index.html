@@ -161,14 +161,15 @@
       ["tree", "Structured Document Tree"],
       ["structure", "Sections / Subsections / Tables"],
       ["understand", "Query Understanding"],
-      ["txtai", "txtai Embeddings + Vector Search"],
+      ["vector", "pgvector + Sentence-Transformers"],
       ["bm25", "BM25 Search"],
       ["hybrid", "Hybrid Retrieval"],
       ["rerank", "Reranking"],
       ["hierarchy", "Hierarchical Expansion"],
       ["tables", "Table Retrieval"],
       ["context", "Context Organizer"],
-      ["llm", "Qwen"],
+      ["graph", "LangGraph"],
+      ["llm", "LangChain + Qwen"],
     ];
 
     function normalizeFlow(flow) {
@@ -325,15 +326,46 @@
       setStatus("Running hybrid retrieval…");
       try {
         const document_id = document.getElementById("docSelect").value || null;
-        const res = await fetch("/query", {
+        const res = await fetch("/query/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ question, document_id }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || res.statusText);
-        setStatus(data.llm_skipped ? "Retrieval complete. LLM skipped." : "Query complete.");
-        renderPipeline(data.flow);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.detail || res.statusText);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        let answer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const chunks = buf.split("\n\n");
+          buf = chunks.pop() || "";
+          for (const chunk of chunks) {
+            const line = chunk.trim().replace(/^data:\s*/, "");
+            if (!line) continue;
+            const evt = JSON.parse(line);
+            if (evt.event === "retrieved") {
+              setStatus("Retrieved sections. Generating answer…");
+            } else if (evt.event === "token") {
+              answer += evt.text || "";
+              renderPipeline({
+                llm: {
+                  title: "LangChain + Qwen",
+                  summary: "Streaming…",
+                  data: { answer, skipped: false },
+                },
+              });
+            } else if (evt.event === "done") {
+              setStatus(evt.llm_skipped ? "Retrieval complete. LLM skipped." : "Query complete.");
+              renderPipeline(evt.flow);
+            }
+          }
+        }
       } catch (err) {
         setStatus(String(err), true);
       } finally {

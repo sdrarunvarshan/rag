@@ -2,7 +2,7 @@
 
 PDF documents are parsed with **Docling** into a heading / table tree and indexed at **section, subsection, and table** granularity. There is no fixed-size token chunking.
 
-At query time, the pipeline runs **query understanding → hybrid retrieval → RRF fusion → reranking → hierarchical expansion → table retrieval → context organization → Qwen generation**. Every stage is implemented in this repo and exposed in the `/query` response `flow` field.
+At query time, **LangGraph** runs `retrieve → generate`. Retrieval is unchanged (query understanding → hybrid pgvector + BM25 → RRF → rerank → hierarchy → tables → context). Generation uses **LangChain** `ChatOpenAI` against the Hugging Face router (`HF_TOKEN`). The `/query` response `flow` field still exposes every stage.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ Structured Document Tree
    ↓
 Sections / Subsections / Tables
    ↓
-PostgreSQL (source of truth) + txtai/USearch vectors + BM25 index
+PostgreSQL (source of truth) + pgvector vectors + BM25 index
 ```
 
 ### Query (online)
@@ -32,7 +32,7 @@ Query Type + Scope + Concepts          definition | comparison | numeric | …
 ┌──────────────┴──────────────┐
 ↓                             ↓
 Dense Retrieval               BM25
-txtai + USearch               lexical (rank-bm25)
+pgvector + sentence-transformers  lexical (rank-bm25)
 app/index.py                  app/index.py
 └──────────────┬──────────────┘
        ↓
@@ -50,7 +50,9 @@ Context Organizer                      app/retrieve.py (organize_context)
        ↓
 Structured Context                     labeled blocks within char budget
        ↓
-Qwen                                   app/llm.py (Hugging Face router)
+LangGraph retrieve → generate          app/langgraph_rag.py
+       ↓
+LangChain + Qwen                       app/llm.py (Hugging Face router, HF_TOKEN)
        ↓
 Grounded Answer
 ```
@@ -64,7 +66,8 @@ Grounded Answer
 | Hierarchical Expansion | Walks hit → parent section; adds siblings and children per plan | `app/retrieve.py` |
 | Table Retrieval | Pulls table nodes from hits and expanded sections | `app/retrieve.py` |
 | Context Organizer | Orders blocks (parent / sibling / child / table) into structured context | `app/retrieve.py` |
-| Qwen | Grounded generation from structured context only | `app/llm.py` |
+| LangGraph | Orchestrates retrieve → generate | `app/langgraph_rag.py` |
+| LangChain + Qwen | Grounded generation from structured context only | `app/llm.py` |
 
 The web UI and API return a `flow` object with one entry per stage so you can inspect hits, fusion scores, expansions, and the final context.
 
@@ -73,13 +76,13 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 - Structure-aware ingest (headings and tables, not sliding-window chunks)
 - Query understanding (type, scope, concepts) drives expansion and BM25 query shaping
 - PostgreSQL as the source of truth for document trees
-- Hybrid search: dense (txtai / USearch) + lexical (BM25), fused with RRF
+- Hybrid search: dense (pgvector + sentence-transformers) + lexical (BM25), fused with RRF
 - Hierarchical expansion: parent section, siblings, children, and dedicated table retrieval
 - Context organizer packs labeled blocks under a character budget
 - Query `flow` payload so each pipeline stage is visible in the API response
 - Optional `document_id` filter
 - Valkey / Redis cache for retrieval results
-- LLM via Hugging Face router (`https://router.huggingface.co/v1`), default model **Qwen**
+- LLM via Hugging Face router (`https://router.huggingface.co/v1`), default model **Qwen**, orchestrated with LangGraph and LangChain (`HF_TOKEN`)
 
 ## Stack
 
@@ -88,10 +91,11 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 | API | FastAPI + Uvicorn |
 | Parse | Docling |
 | Store | PostgreSQL (`documents`, `nodes`) |
-| Vectors | txtai embeddings + USearch ANN |
+| Vectors | pgvector + sentence-transformers |
 | Lexical | rank-bm25 |
 | Cache | Valkey (Redis protocol) |
-| LLM | Hugging Face Inference Router, OpenAI Python SDK |
+| LLM | Hugging Face Inference Router via LangChain ChatOpenAI (`HF_TOKEN`) |
+| Orchestration | LangGraph (`retrieve` → `generate`) |
 
 ## Repository layout
 
@@ -101,10 +105,11 @@ app/
   ingest.py            Docling PDF → structured nodes
   query_understand.py  Query type, scope, concepts, expansion plan
   db.py                Postgres schema and queries
-  index.py             txtai + BM25 index
-  usearch_ann.py       USearch backend for txtai
+  index.py             pgvector + BM25 index
+  pgvector_search.py   pgvector-based vector search
   retrieve.py          Hybrid search, RRF, rerank, hierarchy, tables, context, flow
-  llm.py               Hugging Face OpenAI-compatible chat (Qwen)
+  langgraph_rag.py     LangGraph retrieve → generate
+  llm.py               LangChain ChatOpenAI on Hugging Face router (Qwen)
   cache.py             Valkey
   config.py            Environment
 scripts/
@@ -223,6 +228,7 @@ Restart Uvicorn after changing `.env` (`--reload` does not always reload environ
 | `GET` | `/documents` | Indexed documents |
 | `POST` | `/ingest` | Multipart PDF (`file`) |
 | `POST` | `/query` | Question + optional `document_id` |
+| `POST` | `/query/stream` | Same payload; SSE tokens then a final `done` event |
 
 ### Ingest
 
@@ -255,7 +261,7 @@ Response fields:
 - `sources` — expanded sections (parent / siblings / children) used as context
 - `structured` — ordered context blocks with role labels (parent, sibling, child, table, hit)
 - `context` — structured text sent to Qwen
-- `flow` — stage-by-stage pipeline trace (understand → txtai → bm25 → hybrid → rerank → hierarchy → tables → context → llm)
+- `flow` — stage-by-stage pipeline trace (understand → vector → bm25 → hybrid → rerank → hierarchy → tables → context → llm)
 - `llm_skipped` — `true` if generation was skipped or failed
 
 The model is instructed to answer **only from retrieved sections**. If the PDF never defines a term, the answer will say the context is insufficient instead of inventing a definition.
@@ -264,8 +270,7 @@ The model is instructed to answer **only from retrieved sections**. If the PDF n
 
 | Store | Role |
 | --- | --- |
-| PostgreSQL | Document metadata + full node text |
-| `data/txtai` | Vector index (gitignored) |
+| PostgreSQL | Document metadata + full node text + vector embeddings |
 | `data/bm25.pkl` | BM25 corpus (gitignored) |
 | Valkey | Cached retrieval JSON |
 

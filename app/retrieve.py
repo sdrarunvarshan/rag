@@ -424,9 +424,9 @@ def build_query_flow(
             "data": plan,
         },
         {
-            "key": "txtai",
-            "title": "txtai Embeddings + Vector Search",
-            "summary": f"{len(vector_rows)} vector hits (USearch)",
+            "key": "vector",
+            "title": "pgvector + Sentence-Transformers",
+            "summary": f"{len(vector_rows)} vector hits (pgvector)",
             "data": {"hits": vector_rows[:12]},
         },
         {
@@ -480,8 +480,12 @@ def build_query_flow(
         },
         {
             "key": "llm",
-            "title": "Qwen",
-            "summary": (answer[:180] if llm_skipped else f"Grounded answer with {OPENAI_MODEL}"),
+            "title": "LangChain + Qwen",
+            "summary": (
+                answer[:180]
+                if llm_skipped
+                else f"Grounded answer with {OPENAI_MODEL} (Hugging Face router)"
+            ),
             "data": {"answer": answer, "skipped": llm_skipped},
         },
     ]

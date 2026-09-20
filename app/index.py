@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import gc
 import logging
 import pickle
 import re
-import shutil
-import time
 from typing import Any
+from uuid import UUID
 
 from rank_bm25 import BM25Okapi
 
-from app.config import BM25_PATH, EMBEDDING_MODEL, TXTAI_DIR, ensure_data_dirs
+from app.config import BM25_PATH, ensure_data_dirs
 from app.db import fetch_all_index_rows
+from app.pgvector_search import get_vector_store
 
 log = logging.getLogger(__name__)
 
@@ -22,17 +21,9 @@ def tokenize(text: str) -> list[str]:
     return TOKEN_RE.findall((text or "").lower())
 
 
-def _embeddings_config() -> dict[str, Any]:
-    return {
-        "path": EMBEDDING_MODEL,
-        "backend": "app.usearch_ann.USearchANN",
-        "content": True,
-    }
-
-
 class HybridIndex:
     def __init__(self) -> None:
-        self.embeddings = None
+        self.vector_store = get_vector_store()
         self.bm25: BM25Okapi | None = None
         self.ids: list[str] = []
         self.document_ids: list[str] = []
@@ -40,38 +31,12 @@ class HybridIndex:
 
     def load_or_rebuild(self) -> None:
         ensure_data_dirs()
-        loaded = self._load_txtai() and self._load_bm25()
+        loaded = self._load_bm25()
         if loaded and self.ids:
-            log.info("Loaded txtai (USearch) and BM25 indexes (%s nodes)", len(self.ids))
+            log.info("Loaded BM25 index (%s nodes)", len(self.ids))
             return
         log.info("Rebuilding indexes from Postgres")
         self.rebuild()
-
-    def _close_embeddings(self) -> None:
-        embeddings = self.embeddings
-        self.embeddings = None
-        if embeddings is None:
-            return
-        try:
-            embeddings.close()
-        except Exception as exc:
-            log.warning("Could not close txtai embeddings: %s", exc)
-        gc.collect()
-
-    def _clear_txtai_dir(self) -> None:
-        if not TXTAI_DIR.exists():
-            return
-        last_error: Exception | None = None
-        for attempt in range(8):
-            try:
-                shutil.rmtree(TXTAI_DIR)
-                return
-            except PermissionError as exc:
-                last_error = exc
-                time.sleep(0.25 * (attempt + 1))
-                gc.collect()
-        if last_error:
-            raise last_error
 
     def rebuild(self) -> None:
         ensure_data_dirs()
@@ -83,40 +48,14 @@ class HybridIndex:
         self.bm25 = BM25Okapi(self.tokenized) if self.tokenized else None
         self._save_bm25()
 
-        from txtai.embeddings import Embeddings
-
-        self._close_embeddings()
-        self._clear_txtai_dir()
-        ensure_data_dirs()
-        self.embeddings = Embeddings(_embeddings_config())
+        # Rebuild vector embeddings in pgvector
         if rows:
-            records = [
-                {
-                    "id": str(row["id"]),
-                    "text": row["search_text"],
-                    "document_id": str(row["document_id"]),
-                }
+            documents = [
+                (UUID(str(row["id"])), row["search_text"] or "")
                 for row in rows
             ]
-            self.embeddings.index(records)
-            self.embeddings.save(str(TXTAI_DIR))
-        log.info("Indexed %s nodes (txtai/USearch + BM25)", len(self.ids))
-
-    def _load_txtai(self) -> bool:
-        config_path = TXTAI_DIR / "config"
-        if not config_path.exists() and not (TXTAI_DIR / "embeddings").exists():
-            if not any(TXTAI_DIR.glob("*")):
-                return False
-        try:
-            from txtai.embeddings import Embeddings
-
-            self.embeddings = Embeddings()
-            self.embeddings.load(str(TXTAI_DIR))
-            return True
-        except Exception as exc:
-            log.warning("Could not load txtai index: %s", exc)
-            self.embeddings = None
-            return False
+            self.vector_store.add_documents_batch(documents)
+        log.info("Indexed %s nodes (pgvector + BM25)", len(self.ids))
 
     def _load_bm25(self) -> bool:
         if not BM25_PATH.exists():
@@ -145,38 +84,13 @@ class HybridIndex:
             )
 
     def vector_search(self, query: str, limit: int, document_id: str | None = None) -> list[str]:
-        if self.embeddings is None:
-            return []
-        fetch = max(limit * 4, limit)
         try:
-            if document_id:
-                sql = (
-                    "select id, score from txtai where similar(:query) "
-                    "and document_id = :document_id limit :limit"
-                )
-                hits = self.embeddings.search(
-                    sql,
-                    limit=fetch,
-                    parameters={"query": query, "document_id": document_id, "limit": fetch},
-                )
-            else:
-                hits = self.embeddings.search(query, fetch)
+            doc_uuid = UUID(document_id) if document_id else None
+            results = self.vector_store.search(query, limit, doc_uuid)
+            return [result["id"] for result in results]
         except Exception as exc:
-            log.warning("Filtered vector search failed (%s); using unfiltered search", exc)
-            try:
-                hits = self.embeddings.search(query, fetch)
-            except Exception:
-                return []
-        ids: list[str] = []
-        for hit in hits or []:
-            node_id = str(hit["id"] if isinstance(hit, dict) else hit[0])
-            ids.append(node_id)
-        if document_id:
-            allowed = {
-                nid for nid, doc in zip(self.ids, self.document_ids) if doc == document_id
-            }
-            ids = [nid for nid in ids if nid in allowed]
-        return ids[:limit]
+            log.warning("Vector search failed: %s", exc)
+            return []
 
     def bm25_search(self, query: str, limit: int, document_id: str | None = None) -> list[str]:
         if not self.bm25 or not self.ids:
@@ -197,30 +111,21 @@ class HybridIndex:
     def similarity(self, query: str, texts: list[str]) -> list[float]:
         if not texts:
             return []
-        if self.embeddings is not None:
-            try:
-                ranked = self.embeddings.similarity(query, texts)
-                scores = [0.0] * len(texts)
-                for index, score in ranked:
-                    scores[int(index)] = float(score)
-                return scores
-            except Exception as exc:
-                log.warning("txtai similarity failed: %s", exc)
-        return [0.0] * len(texts)
+        try:
+            return self.vector_store.similarity(query, texts)
+        except Exception as exc:
+            log.warning("Similarity computation failed: %s", exc)
+            return [0.0] * len(texts)
 
     def text_for(self, node_id: str) -> str:
-        if self.embeddings is None:
-            return ""
         try:
-            rows = self.embeddings.search(
-                "select id, text from txtai where id = :id",
-                parameters={"id": node_id},
-            )
-            if rows:
-                row = rows[0]
-                return row["text"] if isinstance(row, dict) else ""
-        except Exception:
-            pass
+            uuid = UUID(node_id)
+            from app.db import fetch_node
+            node = fetch_node(uuid)
+            if node:
+                return node.get("search_text") or node.get("text") or ""
+        except Exception as exc:
+            log.warning("Failed to fetch text for node %s: %s", node_id, exc)
         return ""
 
 

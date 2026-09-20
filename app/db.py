@@ -125,6 +125,18 @@ def init_schema() -> None:
     with connect() as conn:
         for statement in SCHEMA_STATEMENTS:
             conn.execute(statement)
+        
+        # Add embedding column if it doesn't exist (for existing databases)
+        try:
+            conn.execute("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS embedding vector(384)")
+        except Exception as exc:
+            log.warning("Could not add embedding column: %s", exc)
+        
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_embedding ON nodes USING ivfflat (embedding vector_cosine_ops)")
+        except Exception as exc:
+            log.warning("Could not create embedding index: %s", exc)
+        
         conn.commit()
 
 
@@ -164,8 +176,8 @@ def insert_nodes(document_id: UUID, nodes: list[dict[str, Any]]) -> None:
                     """
                     INSERT INTO nodes (
                         id, document_id, parent_id, node_type, heading,
-                        text, page, path, search_text
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        text, page, path, search_text, embedding
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
                     """,
                     (
                         node["id"],
@@ -264,13 +276,15 @@ def fetch_tables_under(root_ids: list[UUID], limit: int = 24) -> list[dict[str, 
         rows = conn.execute(
             """
             WITH RECURSIVE tree AS (
-                SELECT * FROM nodes WHERE id = ANY(%s)
+                SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
+                FROM nodes WHERE id = ANY(%s)
                 UNION
-                SELECT n.*
+                SELECT n.id, n.document_id, n.parent_id, n.node_type, n.heading, n.text, n.page, n.path, n.search_text
                 FROM nodes n
                 INNER JOIN tree t ON n.parent_id = t.id
             )
-            SELECT * FROM tree
+            SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
+            FROM tree
             WHERE node_type = 'table'
             ORDER BY path NULLS LAST, id
             LIMIT %s
@@ -285,13 +299,15 @@ def fetch_subtree(root_id: UUID) -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             WITH RECURSIVE tree AS (
-                SELECT * FROM nodes WHERE id = %s
+                SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
+                FROM nodes WHERE id = %s
                 UNION ALL
-                SELECT n.*
+                SELECT n.id, n.document_id, n.parent_id, n.node_type, n.heading, n.text, n.page, n.path, n.search_text
                 FROM nodes n
                 INNER JOIN tree t ON n.parent_id = t.id
             )
-            SELECT * FROM tree
+            SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
+            FROM tree
             ORDER BY path NULLS LAST, id
             """,
             (root_id,),
@@ -395,6 +411,56 @@ def summarize_nodes(ids: list[str]) -> list[dict[str, Any]]:
             "node_type": row["node_type"],
             "path": row.get("path"),
             "page": row.get("page"),
+        }
+        for row in rows
+    ]
+
+
+def upsert_embedding(node_id: UUID, embedding: list[float]) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE nodes SET embedding = %s WHERE id = %s",
+            (embedding, node_id),
+        )
+        conn.commit()
+
+
+def upsert_embeddings_batch(embeddings_data: list[tuple[UUID, list[float]]]) -> None:
+    if not embeddings_data:
+        return
+    with connect() as conn:
+        with conn.cursor() as cur:
+            for node_id, embedding in embeddings_data:
+                cur.execute(
+                    "UPDATE nodes SET embedding = %s WHERE id = %s",
+                    (embedding, node_id),
+                )
+        conn.commit()
+
+
+def vector_search(query_embedding: list[float], limit: int = 20, document_id: UUID | None = None) -> list[dict[str, Any]]:
+    sql = """
+    SELECT id, document_id, 1 - (embedding <=> %s::vector) as similarity
+    FROM nodes
+    WHERE embedding IS NOT NULL
+    """
+    params: list[Any] = [query_embedding]
+    
+    if document_id:
+        sql += " AND document_id = %s"
+        params.append(document_id)
+    
+    sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
+    params.extend([query_embedding, limit])
+    
+    with connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    
+    return [
+        {
+            "id": str(row["id"]),
+            "document_id": str(row["document_id"]),
+            "score": float(row["similarity"]),
         }
         for row in rows
     ]
