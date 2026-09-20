@@ -1,4 +1,4 @@
-# Chunkless Structured RAG
+# Structure-Aware Chunkless RAG
 
 PDF documents are parsed with **Docling** into a heading / table tree and indexed at **section, subsection, and table** granularity. There is no fixed-size token chunking.
 
