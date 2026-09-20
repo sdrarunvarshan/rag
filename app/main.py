@@ -8,14 +8,14 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app import cache, db
 from app.config import UPLOAD_DIR, ensure_data_dirs
 from app.index import hybrid_index
 from app.ingest import ingest_pdf
-from app.langgraph_rag import run_rag_pipeline, stream_rag_pipeline
+from app.langgraph_rag import run_rag_pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -128,16 +128,3 @@ def query(body: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     packed = run_rag_pipeline(body.question, _resolved_document_id(body.document_id))
     return QueryResponse(**packed)
-
-
-@app.post("/query/stream")
-def query_stream(body: QueryRequest) -> StreamingResponse:
-    if not db.ping():
-        raise HTTPException(status_code=503, detail="Postgres is not reachable")
-    document_id = _resolved_document_id(body.document_id)
-
-    def events():
-        for item in stream_rag_pipeline(body.question, document_id):
-            yield f"data: {json.dumps(item, default=str)}\n\n"
-
-    return StreamingResponse(events(), media_type="text/event-stream")
