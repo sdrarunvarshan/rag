@@ -35,10 +35,10 @@ class HybridIndex:
         if loaded and self.ids:
             log.info("Loaded BM25 index (%s nodes)", len(self.ids))
             return
-        log.info("Rebuilding indexes from Postgres")
-        self.rebuild()
+        log.info("Rebuilding BM25 index from Postgres")
+        self.rebuild_bm25()
 
-    def rebuild(self) -> None:
+    def rebuild_bm25(self) -> None:
         ensure_data_dirs()
         rows = fetch_all_index_rows()
         self.ids = [str(row["id"]) for row in rows]
@@ -47,8 +47,13 @@ class HybridIndex:
         self.tokenized = [tokenize(text) for text in texts]
         self.bm25 = BM25Okapi(self.tokenized) if self.tokenized else None
         self._save_bm25()
+        log.info("Indexed %s nodes (BM25)", len(self.ids))
+
+    def rebuild(self) -> None:
+        self.rebuild_bm25()
 
         # Rebuild vector embeddings in pgvector
+        rows = fetch_all_index_rows()
         if rows:
             documents = [
                 (UUID(str(row["id"])), row["search_text"] or "")

@@ -354,10 +354,18 @@ Set secrets in GitHub:
 | Store | Role |
 | --- | --- |
 | PostgreSQL | Document metadata + full node text + vector embeddings |
-| `data/bm25.pkl` | BM25 corpus (gitignored) |
+| `data/bm25.pkl` | BM25 corpus (gitignored). Generated from PostgreSQL nodes. |
 | Valkey | Cached retrieval JSON |
 
 Deleting the source PDF on disk **does not** remove the document from Postgres. Query still works until you delete the `documents` row (`nodes` cascade via `ON DELETE CASCADE`) and rebuild indexes.
+
+### Rebuilding BM25
+
+Because `bm25.pkl` is a local derived artifact generated from PostgreSQL nodes, you should regenerate it whenever your PostgreSQL document corpus changes (e.g. after ingest or deletion):
+
+```bash
+uv run python scripts/rebuild_bm25.py
+```
 
 
 ## License
