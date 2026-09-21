@@ -349,7 +349,6 @@ The `.github/workflows/ci.yml` file includes a GitHub Actions workflow that:
 
 Set secrets in GitHub:
 - `HF_TOKEN`: Hugging Face token for LLM access
-- `DEEPEVAL_API_KEY`: Optional DeepEval API key for cloud features
 
 ## What is stored where
 

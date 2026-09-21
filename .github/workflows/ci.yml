@@ -37,7 +37,6 @@ jobs:
         pytest tests/test_rag_evaluation.py -v --tb=short
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        DEEPEVAL_API_KEY: ${{ secrets.DEEPEVAL_API_KEY }}
     
     - name: Run RAGAS evaluation (if HF_TOKEN available)
       run: |
