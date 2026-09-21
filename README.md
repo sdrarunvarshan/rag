@@ -236,7 +236,6 @@ Restart Uvicorn after changing `.env` (`--reload` does not always reload environ
 | `GET` | `/documents` | Indexed documents |
 | `POST` | `/ingest` | Multipart PDF (`file`) |
 | `POST` | `/query` | Question + optional `document_id` |
-| `POST` | `/query/stream` | Same payload; SSE tokens then a final `done` event |
 
 ### Ingest
 
