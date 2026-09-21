@@ -16,6 +16,7 @@ from app.config import UPLOAD_DIR, ensure_data_dirs
 from app.index import hybrid_index
 from app.ingest import ingest_pdf
 from app.langgraph_rag import run_rag_pipeline
+from app.telemetry import setup_telemetry, instrument_fastapi
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -26,6 +27,14 @@ UI_PAGE = Path(__file__).resolve().parent / "templates" / "index.html"
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     ensure_data_dirs()
+    
+    # Set up OpenTelemetry with Phoenix
+    try:
+        setup_telemetry()
+        log.info("OpenTelemetry tracing enabled with Phoenix")
+    except Exception as exc:
+        log.warning("Telemetry setup failed: %s", exc)
+    
     try:
         db.init_schema()
         log.info("Postgres schema ready")
@@ -44,6 +53,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Chunkless Structured RAG", lifespan=lifespan)
+
+# Instrument FastAPI with OpenTelemetry
+instrument_fastapi(app)
 
 
 class QueryRequest(BaseModel):

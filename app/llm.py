@@ -59,6 +59,27 @@ def chat_model() -> ChatOpenAI:
     )
 
 
+def get_llm() -> ChatOpenAI:
+    """
+    Get the LLM instance for evaluation and testing.
+    This is the same as chat_model() but with a deterministic temperature.
+    """
+    return ChatOpenAI(
+        model=OPENAI_MODEL,
+        api_key=LLM_API_KEY,
+        base_url=OPENAI_BASE_URL,
+        temperature=0.0,  # Deterministic for evaluation
+        max_tokens=LLM_MAX_TOKENS,
+        top_p=LLM_TOP_P,
+        presence_penalty=LLM_PRESENCE_PENALTY,
+        extra_body={
+            "top_k": LLM_TOP_K,
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+
+
 def build_messages(question: str, context: str, query_plan: dict | None = None) -> list:
     plan = query_plan or {}
     plan_line = (

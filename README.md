@@ -96,6 +96,8 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 | Cache | Valkey (Redis protocol) |
 | LLM | Hugging Face Inference Router via LangChain ChatOpenAI (`HF_TOKEN`) |
 | Orchestration | LangGraph (`retrieve` → `generate`) |
+| Observability | OpenTelemetry + Arize Phoenix |
+| Evaluation | RAGAS + DeepEval |
 
 ## Repository layout
 
@@ -112,15 +114,20 @@ app/
   llm.py               LangChain ChatOpenAI on Hugging Face router (Qwen)
   cache.py             Valkey
   config.py            Environment
+  telemetry.py         OpenTelemetry instrumentation with Phoenix
+  evaluation.py        RAGAS evaluation metrics
 scripts/
-  ingest_pdf.py    CLI ingest
-  check_services.py  Postgres / Valkey ping
+  ingest_pdf.py        CLI ingest
+  check_services.py    Postgres / Valkey ping
+  start_phoenix.py     Start Phoenix observability server
+tests/
+  test_rag_evaluation.py  DeepEval pytest tests for CI/CD
 .env.example       Copy to .env (never commit .env)
 requirements.txt
 ```
 
 ## Prerequisites
-
+- uv
 - Python 3.10+
 - PostgreSQL on `localhost:5432`
 - Valkey or Redis on `127.0.0.1:6379`
@@ -159,24 +166,25 @@ Or set `VALKEY_URL` to the WSL IP from `wsl hostname -I`.
 ```bash
 git clone <your-repo-url>
 cd rag
-python -m venv .venv
+
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
+uv venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
+uv pip install -r requirements.txt
 copy .env.example .env
 ```
 
 **Linux / macOS**
 
 ```bash
+uv venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 cp .env.example .env
 ```
 
@@ -210,7 +218,7 @@ OPENAI_MODEL=Qwen/Qwen3.5-0.9B
 ## Run
 
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Open:
@@ -239,7 +247,7 @@ curl -F "file=@./paper.pdf" http://127.0.0.1:8000/ingest
 CLI:
 
 ```bash
-python scripts/ingest_pdf.py ./paper.pdf
+uv run python scripts/ingest_pdf.py ./paper.pdf
 ```
 
 The response includes `document_id`. The original PDF is parsed once; the file is not required afterward.
@@ -265,6 +273,83 @@ Response fields:
 - `llm_skipped` — `true` if generation was skipped or failed
 
 The model is instructed to answer **only from retrieved sections**. If the PDF never defines a term, the answer will say the context is insufficient instead of inventing a definition.
+
+## Observability & Evaluation
+
+### Arize Phoenix (OpenTelemetry Tracing)
+
+The application includes OpenTelemetry instrumentation with Arize Phoenix for distributed tracing and observability.
+
+**Start Phoenix server:**
+
+```bash
+uv run python scripts/start_phoenix.py
+```
+
+Phoenix UI will be available at `http://localhost:6006`.
+
+**Configure Phoenix:**
+
+Add to `.env`:
+
+```bash
+PHOENIX_ENDPOINT=http://localhost:6006
+PHOENIX_PROJECT_NAME=rag-evaluation
+```
+
+Tracing is automatically enabled when the RAG API starts. Phoenix captures:
+- FastAPI request traces
+- LangChain LLM calls
+- Retrieval pipeline stages
+- Custom spans for query understanding and context organization
+
+### RAGAS Evaluation
+
+RAGAS provides comprehensive metrics for RAG system evaluation:
+
+```python
+from app.evaluation import RAGASEvaluator
+
+evaluator = RAGASEvaluator()
+results = evaluator.evaluate_dataset(
+    questions=["question1", "question2"],
+    answers=["answer1", "answer2"],
+    contexts=[["context1"], ["context2"]],
+    ground_truths=["truth1", "truth2"]
+)
+```
+
+Available metrics:
+- **Faithfulness**: Measures if answers are grounded in retrieved context
+- **Answer Relevance**: Measures if answers address the user's question
+- **Context Precision**: Measures if retrieved context is relevant
+- **Context Recall**: Measures if all relevant information was retrieved
+
+### DeepEval CI/CD Testing
+
+DeepEval provides pytest-based tests for continuous quality assurance:
+
+```bash
+# Run evaluation tests
+uv run pytest tests/test_rag_evaluation.py -v
+```
+
+Tests include:
+- Faithfulness verification
+- Answer relevancy checks
+- Contextual relevancy validation
+- Comprehensive pipeline quality tests
+
+**CI/CD Integration:**
+
+The `.github/workflows/ci.yml` file includes a GitHub Actions workflow that:
+- Runs DeepEval tests on every push/PR
+- Executes RAGAS evaluation (when HF_TOKEN is available)
+- Ensures RAG quality gates before deployment
+
+Set secrets in GitHub:
+- `HF_TOKEN`: Hugging Face token for LLM access
+- `DEEPEVAL_API_KEY`: Optional DeepEval API key for cloud features
 
 ## What is stored where
 

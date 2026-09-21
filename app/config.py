@@ -37,6 +37,10 @@ DATA_DIR = ROOT / "data"
 BM25_PATH = DATA_DIR / "bm25.pkl"
 UPLOAD_DIR = DATA_DIR / "uploads"
 
+# Phoenix configuration
+PHOENIX_ENDPOINT = os.getenv("PHOENIX_ENDPOINT", "http://localhost:6006")
+PHOENIX_PROJECT_NAME = os.getenv("PHOENIX_PROJECT_NAME", "rag-evaluation")
+
 TOP_K_VECTOR = int(os.getenv("TOP_K_VECTOR", "20"))
 TOP_K_BM25 = int(os.getenv("TOP_K_BM25", "20"))
 RRF_K = int(os.getenv("RRF_K", "60"))
@@ -52,3 +56,36 @@ TABLE_RERANK_BONUS = float(os.getenv("TABLE_RERANK_BONUS", "0.15"))
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class Settings:
+    """Application settings class for easy access to configuration."""
+    
+    def __init__(self):
+        self.database_url = DATABASE_URL
+        self.database_url_fallback = DATABASE_URL_FALLBACK
+        self.valkey_url = VALKEY_URL
+        self.hf_token = HF_TOKEN
+        self.openai_api_key = OPENAI_API_KEY
+        self.llm_api_key = LLM_API_KEY
+        self.openai_base_url = OPENAI_BASE_URL
+        self.embedding_model = EMBEDDING_MODEL
+        self.openai_model = OPENAI_MODEL
+        self.llm_max_tokens = LLM_MAX_TOKENS
+        self.llm_temperature = LLM_TEMPERATURE
+        self.llm_top_p = LLM_TOP_P
+        self.llm_presence_penalty = LLM_PRESENCE_PENALTY
+        self.llm_top_k = LLM_TOP_K
+        self.cache_ttl_seconds = CACHE_TTL_SECONDS
+        self.phoenix_endpoint = PHOENIX_ENDPOINT
+        self.phoenix_project_name = PHOENIX_PROJECT_NAME
+
+
+_settings_instance = None
+
+def get_settings() -> Settings:
+    """Get the singleton settings instance."""
+    global _settings_instance
+    if _settings_instance is None:
+        _settings_instance = Settings()
+    return _settings_instance
