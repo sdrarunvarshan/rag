@@ -14,3 +14,4 @@ scipy
 langchain
 langchain-openai
 langgraph
+fastmcp

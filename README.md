@@ -56,6 +56,26 @@ LangChain + Qwen                       app/llm.py (Hugging Face router, HF_TOKEN
        ↓
 Grounded Answer
 ```
+### MCP Interface
+
+The RAG pipeline is also exposed as an MCP server using FastMCP.
+
+AI Client
+   ↓
+MCP Client
+   ↓
+FastMCP (stdio)
+   ↓
+RAG tools
+   ├── query_document
+   ├── retrieve_document_context
+   ├── get_document
+   ├── cache_health
+   └── rag_health
+   ↓
+Existing RAG pipeline
+   ↓
+LangGraph → Retrieval → Qwen
 
 | Stage | What it does | Code |
 | --- | --- | --- |
@@ -83,12 +103,16 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 - Optional `document_id` filter
 - Valkey / Redis cache for retrieval results
 - LLM via Hugging Face router (`https://router.huggingface.co/v1`), default model **Qwen**, orchestrated with LangGraph and LangChain (`HF_TOKEN`)
+- MCP interface using FastMCP
+- MCP tools for querying, retrieval, document access, and health checks
+- AI agent that uses MCP tools with LLM function calling for grounded answers
 
 ## Stack
 
 | Layer | Technology |
 | --- | --- |
 | API | FastAPI + Uvicorn |
+| MCP | FastMCP |
 | Parse | Docling |
 | Store | PostgreSQL (`documents`, `nodes`) |
 | Vectors | pgvector + sentence-transformers |
@@ -104,6 +128,9 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 ```
 app/
   main.py              FastAPI routes: /, /health, /documents, /ingest, /query
+  my_server.py         FastMCP MCP server and RAG tools
+  agent.py             AI agent that uses MCP tools with Qwen LLM
+  test_agent.py        Test script for MCP server connectivity
   ingest.py            Docling PDF → structured nodes
   query_understand.py  Query type, scope, concepts, expansion plan
   db.py                Postgres schema and queries
@@ -237,11 +264,78 @@ Restart Uvicorn after changing `.env` (`--reload` does not always reload environ
 | `POST` | `/ingest` | Multipart PDF (`file`) |
 | `POST` | `/query` | Question + optional `document_id` |
 
+## MCP Server
+
+The project exposes the Structure-Aware RAG pipeline through the Model Context Protocol (MCP) using FastMCP.
+
+The MCP server provides an interface for MCP-compatible AI clients to interact with the RAG system without directly calling the FastAPI `/query` endpoint.
+
+### MCP tools
+
+| Tool | Description |
+| --- | --- |
+| `query_document` | Runs the complete RAG pipeline: retrieval → hierarchy → context → LangGraph → generation |
+| `retrieve_document_context` | Runs retrieval only and returns query planning, retrieved sections, tables, and structured context |
+| `get_document` | Retrieves metadata for a document using its `document_id` |
+| `cache_health` | Checks Valkey availability |
+| `rag_health` | Returns basic RAG service health information |
+
+### MCP transport
+
+The MCP server uses `stdio` transport. The client spawns the server as a subprocess and communicates via stdin/stdout.
+
+### Start MCP server
+
+```bash
+uv run python -m app.my_server
+```
+
 ### Ingest
 
 ```bash
 curl -F "file=@./paper.pdf" http://127.0.0.1:8000/ingest
 ```
+
+## AI Agent
+
+The project includes an AI agent (`app/agent.py`) that connects to the MCP server and uses an LLM (Qwen via Hugging Face) to answer questions using the RAG tools.
+
+The agent:
+- Spawns the MCP server process using stdio transport
+- Retrieves available MCP tools
+- Converts MCP tools to OpenAI-compatible function calling format
+- Uses Qwen (via Hugging Face router) to decide which tools to call
+- Executes MCP tools and returns grounded answers
+
+### Run AI Agent
+
+Start the MCP server first:
+
+```bash
+uv run python -m app.my_server
+```
+
+In a separate terminal, run the AI agent:
+
+```bash
+uv run python -m app.agent
+```
+
+The agent will prompt for a question and use the MCP tools to answer it.
+
+### Test MCP Connection
+
+To verify MCP server connectivity and list available tools:
+
+```bash
+uv run python -m app.test_agent
+```
+
+This will output:
+- Available MCP tools
+- Tool descriptions
+
+## Ingest
 
 CLI:
 

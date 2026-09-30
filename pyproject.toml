@@ -13,6 +13,7 @@ dependencies = [
     "deepeval>=2.10.0",
     "docling>=2.129.0",
     "fastapi>=0.141.1",
+    "fastmcp>=4.0.10",
     "langchain>=1.4.2",
     "langchain-openai>=1.6.2",
     "langgraph>=1.2.12",
