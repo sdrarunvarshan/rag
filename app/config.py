@@ -41,6 +41,12 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 PHOENIX_ENDPOINT = os.getenv("PHOENIX_ENDPOINT", "http://localhost:6006")
 PHOENIX_PROJECT_NAME = os.getenv("PHOENIX_PROJECT_NAME", "rag-evaluation")
 
+# Temporal configuration
+TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost")
+TEMPORAL_PORT = os.getenv("TEMPORAL_PORT", "7233")
+TEMPORAL_NAMESPACE = os.getenv("TEMPORAL_NAMESPACE", "default")
+TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "rag-task-queue")
+
 TOP_K_VECTOR = int(os.getenv("TOP_K_VECTOR", "20"))
 TOP_K_BM25 = int(os.getenv("TOP_K_BM25", "20"))
 RRF_K = int(os.getenv("RRF_K", "60"))
@@ -79,6 +85,10 @@ class Settings:
         self.cache_ttl_seconds = CACHE_TTL_SECONDS
         self.phoenix_endpoint = PHOENIX_ENDPOINT
         self.phoenix_project_name = PHOENIX_PROJECT_NAME
+        self.temporal_host = TEMPORAL_HOST
+        self.temporal_port = TEMPORAL_PORT
+        self.temporal_namespace = TEMPORAL_NAMESPACE
+        self.temporal_task_queue = TEMPORAL_TASK_QUEUE
 
 
 _settings_instance = None

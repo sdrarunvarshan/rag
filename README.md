@@ -109,6 +109,7 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 - MCP interface using FastMCP
 - MCP tools for querying, retrieval, document access, and health checks
 - AI agent that uses MCP tools with LLM function calling for grounded answers
+- **Temporal.io integration** for durable workflow execution with automatic retries and crash recovery
 
 ## Stack
 
@@ -122,7 +123,7 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 | Lexical | rank-bm25 |
 | Cache | Valkey (Redis protocol) |
 | LLM | Hugging Face Inference Router via LangChain ChatOpenAI (`HF_TOKEN`) |
-| Orchestration | LangGraph (`retrieve` → `generate`) |
+| Orchestration | LangGraph (`retrieve` → `generate`) + Temporal (durable workflows) |
 | Observability | OpenTelemetry + Arize Phoenix |
 | Evaluation | RAGAS + DeepEval |
 
@@ -146,6 +147,9 @@ app/
   config.py            Environment
   telemetry.py         OpenTelemetry instrumentation with Phoenix
   evaluation.py        RAGAS evaluation metrics
+  temporal_activities.py Temporal activities for durable execution
+  temporal_workflows.py Temporal workflows (IngestWorkflow, QueryWorkflow)
+  temporal_worker.py   Temporal worker process
 scripts/
   ingest_pdf.py        CLI ingest
   check_services.py    Postgres / Valkey ping
@@ -162,6 +166,7 @@ requirements.txt
 - PostgreSQL on `localhost:5432`
 - Valkey or Redis on `127.0.0.1:6379`
 - A [Hugging Face access token](https://huggingface.co/settings/tokens) (`HF_TOKEN`) for generation (retrieval still works without it)
+- Temporal Server (optional, for durable workflow execution)
 
 ### Database
 
@@ -236,6 +241,10 @@ Edit `.env` and set `HF_TOKEN`. Do not commit `.env`.
 | `LLM_TOP_K` | Passed as `extra_body.top_k` (default `20`) |
 | `EMBEDDING_MODEL` | Default `sentence-transformers/all-MiniLM-L6-v2` |
 | `CACHE_TTL_SECONDS` | Default `3600` |
+| `TEMPORAL_HOST` | Temporal server host (default `localhost`) |
+| `TEMPORAL_PORT` | Temporal server port (default `7233`) |
+| `TEMPORAL_NAMESPACE` | Temporal namespace (default `default`) |
+| `TEMPORAL_TASK_QUEUE` | Temporal task queue (default `rag-task-queue`) |
 
 `Qwen/Qwen3.5-0.9B` is available on the Hugging Face Inference Router. That checkpoint is for  local vLLM / SGLang server. 
 ```
@@ -257,6 +266,57 @@ Open:
 - Docs: `http://127.0.0.1:8000/docs`
 
 Restart Uvicorn after changing `.env` (`--reload` does not always reload environment files).
+
+## Temporal Setup (Optional)
+
+Temporal provides durable workflow execution with automatic retries and crash recovery. The RAG API will automatically use Temporal if available, otherwise it falls back to direct execution.
+
+### Install Temporal CLI
+
+```bash
+# macOS
+brew install temporal
+
+# Linux
+curl -sSf https://temporal.io/cli.sh | sh
+
+# Windows
+# Download from https://temporal.io/cli
+```
+
+### Start Temporal Server
+
+```bash
+# Start a local Temporal server (single-node for development)
+temporal server start-dev
+
+# Or use Docker
+docker run --rm -p 7233:7233 temporalio/server:latest
+```
+
+### Start Temporal Worker
+
+In a separate terminal, start the Temporal worker to execute workflows:
+
+```bash
+uv run python -m app.temporal_worker
+```
+
+The worker will:
+- Connect to Temporal at `localhost:7233`
+- Listen on the `rag-task-queue`
+- Execute ingest and query workflows
+
+### Temporal Benefits
+
+- **Crash Recovery**: If the FastAPI server crashes during ingest/query, Temporal automatically resumes the workflow from the last completed activity
+- **Automatic Retries**: Failed activities are automatically retried with configurable policies
+- **Visibility**: Monitor workflow execution in the Temporal web UI at `http://localhost:8233`
+- **Durable Execution**: Workflows survive server restarts and network failures
+
+### Without Temporal
+
+If Temporal is not running, the API automatically falls back to direct execution. All functionality remains available, but without the durability guarantees provided by Temporal.
 
 ## API
 
