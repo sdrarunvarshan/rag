@@ -56,10 +56,12 @@ LangChain + Qwen                       app/llm.py (Hugging Face router, HF_TOKEN
        ↓
 Grounded Answer
 ```
+
 ### MCP Interface
 
 The RAG pipeline is also exposed as an MCP server using FastMCP.
 
+```
 AI Client
    ↓
 MCP Client
@@ -76,6 +78,7 @@ RAG tools
 Existing RAG pipeline
    ↓
 LangGraph → Retrieval → Qwen
+```
 
 | Stage | What it does | Code |
 | --- | --- | --- |
