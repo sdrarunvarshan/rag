@@ -24,6 +24,7 @@ from app.config import (
 )
 from app.index import hybrid_index
 from app.ingest import ingest_pdf
+from app.garage_client import ensure_bucket, ping as garage_ping
 from app.langgraph_rag import run_rag_pipeline
 from app.telemetry import setup_telemetry, instrument_fastapi
 from app.temporal_workflows import IngestParams, IngestWorkflow, QueryParams, QueryWorkflow
@@ -58,6 +59,14 @@ async def lifespan(_app: FastAPI):
         log.info("Valkey reachable")
     else:
         log.warning("Valkey unavailable at startup")
+    try:
+        ensure_bucket()
+        if garage_ping():
+            log.info("Garage reachable")
+        else:
+            log.warning("Garage unavailable at startup")
+    except Exception as exc:
+        log.warning("Garage setup failed: %s", exc)
     try:
         db.ping()
         hybrid_index.load_or_rebuild()
@@ -118,8 +127,9 @@ def home():
 def health() -> dict:
     postgres = db.ping()
     valkey = cache.ping()
-    status = "ok" if postgres and valkey else "degraded"
-    return {"status": status, "postgres": postgres, "valkey": valkey}
+    garage = garage_ping()
+    status = "ok" if postgres and valkey and garage else "degraded"
+    return {"status": status, "postgres": postgres, "valkey": valkey, "garage": garage}
 
 
 @app.get("/documents")
@@ -128,6 +138,20 @@ def documents() -> dict:
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     items = db.list_documents()
     return {"documents": items}
+
+
+@app.get("/documents/{document_id}/images")
+def document_images(document_id: str) -> dict:
+    if not db.ping():
+        raise HTTPException(status_code=503, detail="Postgres is not reachable")
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
+    if not db.document_exists(doc_uuid):
+        raise HTTPException(status_code=404, detail="document_id not found")
+    images = db.fetch_images_by_document(doc_uuid)
+    return {"document_id": document_id, "images": images}
 
 
 @app.post("/ingest")

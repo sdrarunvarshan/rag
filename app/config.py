@@ -47,6 +47,14 @@ TEMPORAL_PORT = os.getenv("TEMPORAL_PORT", "7233")
 TEMPORAL_NAMESPACE = os.getenv("TEMPORAL_NAMESPACE", "default")
 TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "rag-task-queue")
 
+# Garage (S3-compatible storage) configuration
+GARAGE_ENDPOINT = os.getenv("GARAGE_ENDPOINT", "http://localhost:3900")
+GARAGE_ACCESS_KEY = os.getenv("GARAGE_ACCESS_KEY", "garage-key")
+GARAGE_SECRET_KEY = os.getenv("GARAGE_SECRET_KEY", "garage-secret")
+GARAGE_SECURE = os.getenv("GARAGE_SECURE", "false").lower() == "true"
+GARAGE_BUCKET = os.getenv("GARAGE_BUCKET", "rag-documents")
+GARAGE_REGION = os.getenv("GARAGE_REGION", "garage")
+
 TOP_K_VECTOR = int(os.getenv("TOP_K_VECTOR", "20"))
 TOP_K_BM25 = int(os.getenv("TOP_K_BM25", "20"))
 RRF_K = int(os.getenv("RRF_K", "60"))
@@ -89,6 +97,12 @@ class Settings:
         self.temporal_port = TEMPORAL_PORT
         self.temporal_namespace = TEMPORAL_NAMESPACE
         self.temporal_task_queue = TEMPORAL_TASK_QUEUE
+        self.garage_endpoint = GARAGE_ENDPOINT
+        self.garage_access_key = GARAGE_ACCESS_KEY
+        self.garage_secret_key = GARAGE_SECRET_KEY
+        self.garage_secure = GARAGE_SECURE
+        self.garage_bucket = GARAGE_BUCKET
+        self.garage_region = GARAGE_REGION
 
 
 _settings_instance = None

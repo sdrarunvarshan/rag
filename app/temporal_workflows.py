@@ -11,6 +11,7 @@ from app.temporal_activities import (
     get_ingest_stats_activity,
     generate_answer_activity,
     insert_document_activity,
+    insert_images_activity,
     insert_nodes_activity,
     parse_pdf_activity,
     rebuild_index_activity,
@@ -116,18 +117,28 @@ class IngestWorkflow:
             start_to_close_timeout=60,
         )
 
-        # Step 4: Rebuild indexes
+        # Step 4: Insert parsed images (if any)
+        if parsed_data.get("images"):
+            await workflow.execute_activity(
+                insert_images_activity,
+                document_id,
+                parsed_data["images"],
+                start_to_close_timeout=120,
+            )
+
+        # Step 5: Rebuild indexes
         await workflow.execute_activity(
             rebuild_index_activity,
             start_to_close_timeout=120,
         )
 
-        # Step 5: Get statistics
+        # Step 6: Get statistics
         stats = await workflow.execute_activity(
             get_ingest_stats_activity,
             document_id,
             params.filename,
             parsed_data["nodes_count"],
+            parsed_data.get("images_count", 0),
             start_to_close_timeout=30,
         )
 

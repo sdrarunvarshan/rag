@@ -8,12 +8,47 @@ from uuid import UUID
 
 import psycopg
 from psycopg.rows import dict_row
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import DATABASE_URL, DATABASE_URL_FALLBACK
+from app.models import Base, Document, Image, Node
 
 log = logging.getLogger(__name__)
 
 _active_url: str | None = None
+_engine = None
+_session_maker = None
+
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        url = resolve_database_url()
+        _engine = create_engine(url)
+    return _engine
+
+
+def get_session_maker():
+    global _session_maker
+    if _session_maker is None:
+        _session_maker = sessionmaker(bind=get_engine())
+    return _session_maker
+
+
+@contextmanager
+def get_session() -> Iterator[Session]:
+    session = get_session_maker()()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+_engine = None
+_session_maker = None
 
 
 def _auth_failed(exc: BaseException) -> bool:
@@ -87,9 +122,23 @@ SCHEMA_STATEMENTS = (
         search_text TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS images (
+        id UUID PRIMARY KEY,
+        document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        node_id UUID REFERENCES nodes(id) ON DELETE CASCADE,
+        minio_key TEXT NOT NULL,
+        page INTEGER,
+        caption TEXT,
+        mime_type TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_nodes_document_id ON nodes(document_id)",
     "CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes(parent_id)",
     "CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type)",
+    "CREATE INDEX IF NOT EXISTS idx_images_document_id ON images(document_id)",
+    "CREATE INDEX IF NOT EXISTS idx_images_node_id ON images(node_id)",
 )
 
 
@@ -122,21 +171,16 @@ def ensure_database() -> None:
 
 def init_schema() -> None:
     ensure_database()
+    # Schema is now managed by Alembic migrations
+    # Run migrations instead of manual schema creation
+    log.info("Schema managed by Alembic - run 'alembic upgrade head' to apply migrations")
+    # Keep backward compatibility - try to create schema if it doesn't exist
     with connect() as conn:
         for statement in SCHEMA_STATEMENTS:
-            conn.execute(statement)
-        
-        # Add embedding column if it doesn't exist (for existing databases)
-        try:
-            conn.execute("ALTER TABLE nodes ADD COLUMN IF NOT EXISTS embedding vector(384)")
-        except Exception as exc:
-            log.warning("Could not add embedding column: %s", exc)
-        
-        try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_embedding ON nodes USING ivfflat (embedding vector_cosine_ops)")
-        except Exception as exc:
-            log.warning("Could not create embedding index: %s", exc)
-        
+            try:
+                conn.execute(statement)
+            except Exception as exc:
+                log.debug("Schema statement failed (might exist): %s", exc)
         conn.commit()
 
 
@@ -436,6 +480,78 @@ def upsert_embeddings_batch(embeddings_data: list[tuple[UUID, list[float]]]) -> 
                     (embedding, node_id),
                 )
         conn.commit()
+
+
+def insert_image(
+    image_id: UUID,
+    document_id: UUID,
+    node_id: UUID | None,
+    minio_key: str,
+    page: int | None,
+    caption: str | None,
+    mime_type: str,
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO images (id, document_id, node_id, minio_key, page, caption, mime_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (image_id, document_id, node_id, minio_key, page, caption, mime_type),
+        )
+        conn.commit()
+
+
+def fetch_images_by_document(document_id: UUID) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, document_id, node_id, minio_key, page, caption, mime_type, created_at
+            FROM images
+            WHERE document_id = %s
+            ORDER BY page, created_at
+            """,
+            (document_id,),
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "document_id": str(row["document_id"]),
+            "node_id": str(row["node_id"]) if row["node_id"] else None,
+            "minio_key": row["minio_key"],
+            "page": row["page"],
+            "caption": row["caption"],
+            "mime_type": row["mime_type"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        }
+        for row in rows
+    ]
+
+
+def fetch_images_by_node(node_id: UUID) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, document_id, node_id, minio_key, page, caption, mime_type, created_at
+            FROM images
+            WHERE node_id = %s
+            ORDER BY page, created_at
+            """,
+            (node_id,),
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "document_id": str(row["document_id"]),
+            "node_id": str(row["node_id"]) if row["node_id"] else None,
+            "minio_key": row["minio_key"],
+            "page": row["page"],
+            "caption": row["caption"],
+            "mime_type": row["mime_type"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        }
+        for row in rows
+    ]
 
 
 def vector_search(query_embedding: list[float], limit: int = 20, document_id: UUID | None = None) -> list[dict[str, Any]]:

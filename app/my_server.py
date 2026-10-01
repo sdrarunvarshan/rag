@@ -5,7 +5,8 @@ from typing import Any
 from fastmcp import FastMCP
 from uuid import UUID
 from app.cache import ping as valkey_ping
-from app.db import fetch_document
+from app.db import fetch_document, fetch_images_by_document
+from app.garage_client import ping as garage_ping
 from app.langgraph_rag import run_rag_pipeline
 from app.retrieve import retrieve
 
@@ -128,6 +129,43 @@ def get_document(
             "error": "Invalid document UUID",
         }
 
+
+# ---------------------------------------------------------------------------
+# Get document images
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def get_document_images(
+    document_id: str,
+) -> dict[str, Any]:
+    """
+    Get all images extracted from a document.
+
+    Args:
+        document_id: UUID of the indexed document.
+
+    Returns:
+        List of images with MinIO references and metadata.
+    """
+
+    try:
+        document_uuid = UUID(document_id)
+        images = fetch_images_by_document(document_uuid)
+
+        return {
+            "document_id": document_id,
+            "images": images,
+            "count": len(images),
+        }
+
+    except ValueError:
+        return {
+            "document_id": document_id,
+            "images": [],
+            "count": 0,
+            "error": "Invalid document UUID",
+        }
+
 # ---------------------------------------------------------------------------
 # Valkey health
 # ---------------------------------------------------------------------------
@@ -135,18 +173,25 @@ def get_document(
 @mcp.tool
 def cache_health() -> dict[str, Any]:
     """
-    Check whether the Valkey cache is reachable.
+    Check whether the Valkey cache and Garage are reachable.
 
     Returns:
-        Valkey connectivity status.
+        Valkey and Garage connectivity status.
     """
 
-    healthy = valkey_ping()
+    valkey_healthy = valkey_ping()
+    garage_healthy = garage_ping()
 
     return {
-        "service": "valkey",
-        "healthy": healthy,
-        "status": "ok" if healthy else "unavailable",
+        "service": "cache",
+        "valkey": {
+            "healthy": valkey_healthy,
+            "status": "ok" if valkey_healthy else "unavailable",
+        },
+        "garage": {
+            "healthy": garage_healthy,
+            "status": "ok" if garage_healthy else "unavailable",
+        },
     }
 
 
@@ -157,19 +202,24 @@ def cache_health() -> dict[str, Any]:
 @mcp.tool
 def rag_health() -> dict[str, Any]:
     """
-    Check the health of the RAG cache layer.
+    Check the health of the RAG cache and storage layers.
 
     PostgreSQL health should be checked through the existing application's
     database health function if one is available.
     """
 
     valkey_ok = valkey_ping()
+    garage_ok = garage_ping()
 
     return {
         "service": "structure-aware-rag",
         "valkey": {
             "healthy": valkey_ok,
             "status": "ok" if valkey_ok else "unavailable",
+        },
+        "garage": {
+            "healthy": garage_ok,
+            "status": "ok" if garage_ok else "unavailable",
         },
     }
 

@@ -1,8 +1,15 @@
 /rag/
 data/
+data/images/
 .env
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+garage-data/
+.venv/
+*.db
+*.log
+.DS_Store
+

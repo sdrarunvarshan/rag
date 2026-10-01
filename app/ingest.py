@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.db import insert_document, insert_nodes, node_counts, tree_preview
+from app.db import insert_document, insert_image, insert_nodes, node_counts, tree_preview
+from app.garage_client import ensure_bucket, upload_image
 from app.index import hybrid_index
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,17 @@ class ParsedNode:
             "path": self.path,
             "search_text": self.search_text(),
         }
+
+
+@dataclass
+class ParsedImage:
+    id: UUID
+    document_id: UUID
+    node_id: UUID | None
+    image_data: bytes
+    mime_type: str
+    page: int | None = None
+    caption: str = ""
 
 
 def _label(item: Any) -> str:
@@ -78,10 +90,12 @@ def _classify(item: Any) -> str:
     label = _label(item)
     name = type(item).__name__.lower()
     blob = f"{label} {name}"
-    if any(token in blob for token in ("page_header", "page_footer", "picture", "image", "key_value")):
+    if any(token in blob for token in ("page_header", "page_footer", "key_value")):
         return "skip"
     if "table" in blob:
         return "table"
+    if any(token in blob for token in ("picture", "image")):
+        return "image"
     if any(token in blob for token in ("section_header", "title", "sectionheader")):
         return "heading"
     if _text(item):
@@ -108,6 +122,18 @@ def _export_table(item: Any, doc: Any) -> str:
         return frame.to_markdown(index=False)
     except Exception:
         return _text(item)
+
+
+def _extract_image(item: Any, doc: Any) -> tuple[bytes, str] | None:
+    try:
+        image = item.get_image(doc=doc)
+        if image and image.image:
+            return image.image.pil.tobytes(), "image/png"
+    except AttributeError:
+        pass
+    except Exception:
+        pass
+    return None
 
 
 _converter = None
@@ -162,14 +188,14 @@ def _document_converter():
     return _converter
 
 
-def parse_pdf(path: Path) -> list[ParsedNode]:
+def parse_pdf(path: Path) -> tuple[list[ParsedNode], list[ParsedImage]]:
     converter = _document_converter()
     result = converter.convert(str(path))
-
 
     document = result.document
 
     nodes: list[ParsedNode] = []
+    images: list[ParsedImage] = []
     stack: list[tuple[int, ParsedNode]] = []
     counters: dict[int, int] = {}
 
@@ -235,6 +261,24 @@ def parse_pdf(path: Path) -> list[ParsedNode]:
                 )
             )
             continue
+        if kind == "image":
+            current = ensure_root()
+            image_data = _extract_image(item, document)
+            if image_data:
+                image_bytes, mime_type = image_data
+                caption = _text(item)
+                images.append(
+                    ParsedImage(
+                        id=uuid4(),
+                        document_id=None,
+                        node_id=current.id,
+                        image_data=image_bytes,
+                        mime_type=mime_type,
+                        page=_page(item),
+                        caption=caption,
+                    )
+                )
+            continue
         if kind == "text":
             current = ensure_root()
             piece = _text(item)
@@ -246,7 +290,7 @@ def parse_pdf(path: Path) -> list[ParsedNode]:
 
     if not nodes:
         ensure_root()
-    return nodes
+    return nodes, images
 
 
 def ingest_pdf(path: Path, filename: str | None = None) -> dict[str, Any]:
@@ -255,21 +299,39 @@ def ingest_pdf(path: Path, filename: str | None = None) -> dict[str, Any]:
         raise FileNotFoundError(str(pdf_path))
     display_name = filename or pdf_path.name
     log.info("Parsing PDF with Docling: %s", pdf_path)
-    parsed = parse_pdf(pdf_path)
+    ensure_bucket()
+    parsed, images = parse_pdf(pdf_path)
     document_id = uuid4()
     insert_document(document_id, display_name)
     insert_nodes(document_id, [node.as_row() for node in parsed])
+
+    images_stored = 0
+    for img in images:
+        img.document_id = document_id
+        minio_key = upload_image(document_id, img.image_data, img.mime_type, img.id)
+        insert_image(
+            image_id=img.id,
+            document_id=document_id,
+            node_id=img.node_id,
+            minio_key=minio_key,
+            page=img.page,
+            caption=img.caption,
+            mime_type=img.mime_type,
+        )
+        images_stored += 1
+
     hybrid_index.rebuild()
     counts = node_counts(document_id)
     preview = tree_preview(document_id)
-    log.info("Ingested %s as %s (%s nodes)", display_name, document_id, len(parsed))
+    log.info("Ingested %s as %s (%s nodes, %s images)", display_name, document_id, len(parsed), images_stored)
     return {
         "document_id": str(document_id),
         "filename": display_name,
         "counts": counts,
         "tree_preview": preview,
         "nodes_parsed": len(parsed),
-        "flow": ingest_flow(display_name, counts, preview, len(parsed)),
+        "images_stored": images_stored,
+        "flow": ingest_flow(display_name, counts, preview, len(parsed), images_stored),
     }
 
 
@@ -278,6 +340,7 @@ def ingest_flow(
     counts: dict[str, int],
     preview: list[dict[str, Any]],
     nodes_parsed: int,
+    images_stored: int = 0,
 ) -> dict[str, dict[str, Any]]:
     tree_lines = [
         f"{item.get('path') or '-'} [{item['node_type']}] {item.get('heading') or ''}"
@@ -293,8 +356,8 @@ def ingest_flow(
         {
             "key": "docling",
             "title": "Docling",
-            "summary": f"Parsed structured tree ({nodes_parsed} nodes). No token chunks.",
-            "data": {"parser": "DocumentConverter", "nodes": nodes_parsed},
+            "summary": f"Parsed structured tree ({nodes_parsed} nodes, {images_stored} images). No token chunks.",
+            "data": {"parser": "DocumentConverter", "nodes": nodes_parsed, "images": images_stored},
         },
         {
             "key": "tree",
@@ -311,6 +374,12 @@ def ingest_flow(
                 f"{counts.get('table', 0)} tables"
             ),
             "data": counts,
+        },
+        {
+            "key": "images",
+            "title": "Extracted Images",
+            "summary": f"{images_stored} images extracted and stored in MinIO",
+            "data": {"images": images_stored, "storage": "MinIO"},
         },
         {
             "key": "understand",

@@ -9,6 +9,37 @@ At query time, **LangGraph** runs `retrieve → generate`. Retrieval is unchange
 ### Ingest (offline)
 
 ```
+USER UPLOADS PDF
+                     │
+                     ▼
+                ┌─────────┐
+                │  Garage │
+                │ Original│
+                │   PDF   │
+                └────┬────┘
+                     │
+                     │ object_key
+                     ▼
+                ┌─────────┐
+                │ Temporal│
+                └────┬────┘
+                     │
+                     ▼
+                 Docling
+                     │
+          ┌──────────┴──────────┐
+          │                     │
+          ▼                     ▼
+   Text / Tables          Extracted Images
+          │                     │
+          ▼                     ▼
+   PostgreSQL             Garage
+   + pgvector              + PostgreSQL
+   + metadata              + image references
+```
+
+**Text/Tables Path:**
+```
 Documents
    ↓
 Docling
@@ -18,6 +49,17 @@ Structured Document Tree
 Sections / Subsections / Tables
    ↓
 PostgreSQL (source of truth) + pgvector vectors + BM25 index
+```
+
+**Images Path:**
+```
+Documents
+   ↓
+Docling
+   ↓
+Extracted Images
+   ↓
+Garage (S3-compatible storage) + PostgreSQL (image metadata references)
 ```
 
 ### Query (online)
@@ -72,6 +114,7 @@ RAG tools
    ├── query_document
    ├── retrieve_document_context
    ├── get_document
+   ├── get_document_images
    ├── cache_health
    └── rag_health
    ↓
@@ -97,8 +140,9 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 ## Features
 
 - Structure-aware ingest (headings and tables, not sliding-window chunks)
+- **Image extraction and storage**: Extracts images from PDFs using Docling and stores them in MinIO with PostgreSQL metadata references
 - Query understanding (type, scope, concepts) drives expansion and BM25 query shaping
-- PostgreSQL as the source of truth for document trees
+- PostgreSQL as the source of truth for document trees and image metadata
 - Hybrid search: dense (pgvector + sentence-transformers) + lexical (BM25), fused with RRF
 - Hierarchical expansion: parent section, siblings, children, and dedicated table retrieval
 - Context organizer packs labeled blocks under a character budget
@@ -118,7 +162,10 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 | API | FastAPI + Uvicorn |
 | MCP | FastMCP |
 | Parse | Docling |
-| Store | PostgreSQL (`documents`, `nodes`) |
+| ORM | SQLAlchemy |
+| Migrations | Alembic |
+| Store | PostgreSQL (`documents`, `nodes`, `images`) |
+| Image Storage | Garage (S3-compatible) |
 | Vectors | pgvector + sentence-transformers |
 | Lexical | rank-bm25 |
 | Cache | Valkey (Redis protocol) |
@@ -135,9 +182,10 @@ app/
   my_server.py         FastMCP MCP server and RAG tools
   agent.py             AI agent that uses MCP tools with Qwen LLM
   test_agent.py        Test script for MCP server connectivity
-  ingest.py            Docling PDF → structured nodes
+  ingest.py            Docling PDF → structured nodes + images
   query_understand.py  Query type, scope, concepts, expansion plan
-  db.py                Postgres schema and queries
+  db.py                Postgres schema and queries (documents, nodes, images)
+  models.py            SQLAlchemy ORM models
   index.py             pgvector + BM25 index
   pgvector_search.py   pgvector-based vector search
   retrieve.py          Hybrid search, RRF, rerank, hierarchy, tables, context, flow
@@ -145,26 +193,33 @@ app/
   llm.py               LangChain ChatOpenAI on Hugging Face router (Qwen)
   cache.py             Valkey
   config.py            Environment
+  garage_client.py     Garage (S3-compatible) client for image storage
   telemetry.py         OpenTelemetry instrumentation with Phoenix
   evaluation.py        RAGAS evaluation metrics
   temporal_activities.py Temporal activities for durable execution
   temporal_workflows.py Temporal workflows (IngestWorkflow, QueryWorkflow)
   temporal_worker.py   Temporal worker process
+alembic/
+  env.py               Alembic environment configuration
+  script.py.mako       Migration script template
+  versions/            Database migration files
 scripts/
   ingest_pdf.py        CLI ingest
-  check_services.py    Postgres / Valkey ping
+  check_services.py    Postgres / Valkey / Garage ping
   start_phoenix.py     Start Phoenix observability server
 tests/
   test_rag_evaluation.py  DeepEval pytest tests for CI/CD
 .env.example       Copy to .env (never commit .env)
 requirements.txt
+alembic.ini         Alembic configuration
 ```
 
 ## Prerequisites
 - uv
 - Python 3.10+
 - PostgreSQL on `localhost:5432`
-- Valkey or Redis on `127.0.0.1:6379`
+- Valkey or Redis on `127.0.0.1:6379` (optional but recommended)
+- Docker (for Garage storage)
 - A [Hugging Face access token](https://huggingface.co/settings/tokens) (`HF_TOKEN`) for generation (retrieval still works without it)
 - Temporal Server (optional, for durable workflow execution)
 
@@ -174,7 +229,20 @@ requirements.txt
 CREATE DATABASE rag;
 ```
 
-Tables `documents` and `nodes` are created on API startup.
+Tables are managed by **Alembic migrations** for version control and easy schema updates.
+
+**Run migrations:**
+
+```bash
+# Apply all pending migrations
+uv run alembic upgrade head
+
+# Create a new migration after model changes
+uv run alembic revision --autogenerate -m "Description of changes"
+
+# Rollback to previous migration
+uv run alembic downgrade -1
+```
 
 Default URL (override in `.env`):
 
@@ -183,6 +251,116 @@ postgresql://postgres:1234@localhost:5432/rag
 ```
 
 If that user is rejected, the app also tries `postgresql://1234:1234@localhost:5432/rag`.
+
+### Garage (S3-Compatible Storage)
+
+Garage is used for storing extracted images from PDFs. Garage is an S3-compatible distributed object storage service. Default configuration (override in `.env`):
+
+```
+GARAGE_ENDPOINT=http://localhost:3900
+GARAGE_ACCESS_KEY=garage-key
+GARAGE_SECRET_KEY=garage-secret
+GARAGE_SECURE=false
+GARAGE_BUCKET=rag-documents
+GARAGE_REGION=garage
+```
+# Generate RPC secret (run this in PowerShell)
+-join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
+
+# Update garage-config.toml with the RPC secret
+
+# Create access key
+docker exec garage /garage key create rag-app
+
+# List keys
+docker exec garage /garage key list
+
+# Create bucket
+docker exec garage /garage bucket create rag-documents
+
+# List buckets
+docker exec garage /garage bucket list
+
+# Allow key to access bucket
+docker exec garage /garage bucket allow --read --write --owner rag-documents --key rag-app
+
+# Get bucket info
+docker exec garage /garage bucket info rag-documents
+
+docker-compose down
+ docker-compose up -d    
+
+**Option 1: Docker Deployment (Recommended)**
+
+**Using Docker Compose:**
+
+```bash
+# Start Garage with Docker Compose
+docker-compose up -d
+
+# Garage will be available at:
+# - S3 API: http://localhost:3900
+# - Web UI: http://localhost:3902
+```
+
+**Using Docker directly:**
+
+```bash
+docker run -d \
+  -p 3900:3900 \
+  -p 3902:3902 \
+  --name garage \
+  -v garage_data:/data \
+  dxflrs/garage:latest
+```
+
+**Option 2: Native Installation**
+
+**Windows:**
+```powershell
+# Download Garage from: https://garagehq.deuxfleurs.fr/
+# Extract and run:
+garage.exe server config.toml
+```
+
+**Linux:**
+```bash
+# Install Garage
+curl -sSf https://garagehq.deuxfleurs.fr/install.sh | sh
+
+# Configure Garage
+garage layout create
+garage layout assign
+
+# Start Garage
+garage server
+```
+
+**macOS:**
+```bash
+# Install via Homebrew
+brew install garagehq/deuxfleurs/garage
+
+# Configure and start
+garage layout create
+garage layout assign
+garage server
+```
+
+**Create Bucket and Credentials:**
+
+```bash
+# Create a bucket
+garage bucket create rag-documents
+
+# Create an access key
+garage key new --name rag-key
+
+# Allow key to access the bucket
+garage bucket allow rag-documents --read --write --key <access-key-id>
+```
+
+The Garage web UI is available at `http://localhost:3902` (when using Docker) or at the configured endpoint.
 
 ### Valkey (optional but recommended)
 
@@ -201,14 +379,41 @@ Or set `VALKEY_URL` to the WSL IP from `wsl hostname -I`.
 ```bash
 git clone <your-repo-url>
 cd rag
-
 ```
+
+**Quick Start with Garage (Docker):**
+
+**Windows:**
+```powershell
+# Run the setup script
+.\setup_garage_docker.bat
+
+# Or manually:
+docker-compose up -d
+```
+
+**Linux / macOS:**
+```bash
+# Run the setup script
+chmod +x setup_garage_docker.sh
+./setup_garage_docker.sh
+
+# Or manually:
+docker-compose up -d
+```
+
+After starting Garage:
+1. Access Garage Web UI at `http://localhost:3902`
+2. Create a bucket named `rag-documents`
+3. Create an access key
+4. Update `.env` with your Garage credentials
+
+**Application Setup:**
 
 **Windows (PowerShell)**
 
 ```powershell
 uv venv
-.\.venv\Scripts\Activate.ps1
 .\.venv\Scripts\Activate.ps1
 uv pip install -r requirements.txt
 copy .env.example .env
@@ -224,6 +429,26 @@ cp .env.example .env
 ```
 
 Edit `.env` and set `HF_TOKEN`. Do not commit `.env`.
+
+### Database Migrations
+
+The project uses **Alembic** for database schema management:
+
+```bash
+# Apply all pending migrations (after initial setup)
+uv run alembic upgrade head
+
+# Create a new migration after changing models.py
+uv run alembic revision --autogenerate -m "Description of changes"
+
+# View migration history
+uv run alembic history
+
+# Rollback to previous migration
+uv run alembic downgrade -1
+```
+
+**Note:** If you have an existing database with tables created by the old manual schema, the initial migration will safely skip creating existing tables.
 
 ### Environment variables
 
@@ -245,6 +470,15 @@ Edit `.env` and set `HF_TOKEN`. Do not commit `.env`.
 | `TEMPORAL_PORT` | Temporal server port (default `7233`) |
 | `TEMPORAL_NAMESPACE` | Temporal namespace (default `default`) |
 | `TEMPORAL_TASK_QUEUE` | Temporal task queue (default `rag-task-queue`) |
+| `MINIO_ENDPOINT` | MinIO server endpoint (default `localhost:9000`) |
+| `MINIO_ACCESS_KEY` | MinIO access key (default `minioadmin`) |
+| `MINIO_SECRET_KEY` | MinIO secret key (default `minioadmin`) |
+| `GARAGE_ENDPOINT` | Garage server endpoint (default `http://localhost:3900`) |
+| `GARAGE_ACCESS_KEY` | Garage access key (default `garage-key`) |
+| `GARAGE_SECRET_KEY` | Garage secret key (default `garage-secret`) |
+| `GARAGE_SECURE` | Use HTTPS for Garage (default `false`) |
+| `GARAGE_BUCKET` | Garage bucket name (default `rag-documents`) |
+| `GARAGE_REGION` | Garage region (default `garage`) |
 
 `Qwen/Qwen3.5-0.9B` is available on the Hugging Face Inference Router. That checkpoint is for  local vLLM / SGLang server. 
 ```
@@ -322,8 +556,9 @@ If Temporal is not running, the API automatically falls back to direct execution
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/health` | Postgres and Valkey ping |
+| `GET` | `/health` | Postgres, Valkey, and Garage ping |
 | `GET` | `/documents` | Indexed documents |
+| `GET` | `/documents/{document_id}/images` | Get images for a document |
 | `POST` | `/ingest` | Multipart PDF (`file`) |
 | `POST` | `/query` | Question + optional `document_id` |
 
@@ -340,7 +575,8 @@ The MCP server provides an interface for MCP-compatible AI clients to interact w
 | `query_document` | Runs the complete RAG pipeline: retrieval → hierarchy → context → LangGraph → generation |
 | `retrieve_document_context` | Runs retrieval only and returns query planning, retrieved sections, tables, and structured context |
 | `get_document` | Retrieves metadata for a document using its `document_id` |
-| `cache_health` | Checks Valkey availability |
+| `get_document_images` | Retrieves all images extracted from a document with Garage references |
+| `cache_health` | Checks Valkey and Garage availability |
 | `rag_health` | Returns basic RAG service health information |
 
 ### MCP transport
@@ -510,11 +746,12 @@ Set secrets in GitHub:
 
 | Store | Role |
 | --- | --- |
-| PostgreSQL | Document metadata + full node text + vector embeddings |
+| PostgreSQL | Document metadata + full node text + vector embeddings + image metadata references |
+| MinIO | Extracted images from PDFs (stored as binary objects) |
 | `data/bm25.pkl` | BM25 corpus (gitignored). Generated from PostgreSQL nodes. |
 | Valkey | Cached retrieval JSON |
 
-Deleting the source PDF on disk **does not** remove the document from Postgres. Query still works until you delete the `documents` row (`nodes` cascade via `ON DELETE CASCADE`) and rebuild indexes.
+Deleting the source PDF on disk **does not** remove the document from Postgres. Query still works until you delete the `documents` row (`nodes` and `images` cascade via `ON DELETE CASCADE`) and rebuild indexes.
 
 ### Rebuilding BM25
 
