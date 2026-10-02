@@ -306,12 +306,8 @@ docker-compose up -d
 **Using Docker directly:**
 
 ```bash
-docker run -d \
-  -p 3900:3900 \
-  -p 3902:3902 \
-  --name garage \
-  -v garage_data:/data \
-  dxflrs/garage:latest
+docker run -d -p 3900:3900 -p 3902:3902 --name garage -v garage_data:/data dxflrs/garage:v2.4.0
+
 ```
 
 **Option 2: Native Installation**
