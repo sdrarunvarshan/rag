@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -125,15 +126,26 @@ def _export_table(item: Any, doc: Any) -> str:
 
 
 def _extract_image(item: Any, doc: Any) -> tuple[bytes, str] | None:
+    """Docling's PictureItem.get_image returns a PIL image, or None unless
+    generate_picture_images was enabled for the conversion."""
     try:
+        image = item.get_image(doc)
+    except TypeError:
         image = item.get_image(doc=doc)
-        if image and image.image:
-            return image.image.pil.tobytes(), "image/png"
-    except AttributeError:
-        pass
-    except Exception:
-        pass
-    return None
+    except Exception as exc:
+        log.warning("Docling picture extraction failed: %s", exc)
+        return None
+    if image is None:
+        return None
+    pil = image
+    nested = getattr(getattr(image, "image", None), "pil", None)
+    if nested is not None:
+        pil = nested
+    if not hasattr(pil, "save"):
+        return None
+    buffer = BytesIO()
+    pil.save(buffer, format="PNG")
+    return buffer.getvalue(), "image/png"
 
 
 _converter = None
@@ -180,6 +192,7 @@ def _document_converter():
 
         options = PdfPipelineOptions()
         options.do_ocr = False
+        options.generate_picture_images = True
         _converter = DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=options),
@@ -299,8 +312,9 @@ def ingest_pdf(path: Path, filename: str | None = None) -> dict[str, Any]:
         raise FileNotFoundError(str(pdf_path))
     display_name = filename or pdf_path.name
     log.info("Parsing PDF with Docling: %s", pdf_path)
-    ensure_bucket()
     parsed, images = parse_pdf(pdf_path)
+    if images:
+        ensure_bucket()
     document_id = uuid4()
     insert_document(document_id, display_name)
     insert_nodes(document_id, [node.as_row() for node in parsed])
