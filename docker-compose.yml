@@ -12,7 +12,7 @@ services:
     volumes:
       - garage_data:/data
       - ./garage-config.toml:/etc/garage.toml:ro
-    command: server /etc/garage.toml
+    command: /garage server 
     restart: unless-stopped
 
 volumes:
