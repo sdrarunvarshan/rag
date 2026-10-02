@@ -1,60 +1,49 @@
-Structure-Aware RAG
-PDF documents are parsed with Docling into a heading / table tree and indexed at section, subsection, and table granularity. There is no fixed-size token chunking.
-At query time, LangGraph runs retrieve → generate. Retrieval is unchanged (query understanding → hybrid pgvector + BM25 → RRF → rerank → hierarchy → tables → context). Generation uses LangChain ChatOpenAI against the Hugging Face router (HF_TOKEN). The /query response flow field still exposes every stage.
-Architecture
-Ingest (offline)
+# Structure-Aware RAG
+
+**Structure-aware Retrieval-Augmented Generation** for PDF documents. Documents are parsed with [Docling](https://github.com/DS4SD/docling) into a heading / table tree and indexed at section, subsection, and table granularity — no fixed-size token chunking.
+
+At query time, [LangGraph](https://github.com/langchain-ai/langgraph) runs **retrieve → generate**. Retrieval is hybrid (pgvector + BM25 → RRF → rerank → hierarchy → tables → context). Generation uses LangChain `ChatOpenAI` against the Hugging Face router (`HF_TOKEN`). The `/query` response `flow` field exposes every pipeline stage.
+
+---
+
+## Architecture
+
+### Ingest (offline)
+
+```
 USER UPLOADS PDF
+        │
+        ▼
+     Docling
+        │
+   ┌────┴────┐
+   ▼         ▼
+Text/Tables  Extracted Images
+   │              │
+   ▼              ▼
+PostgreSQL     Garage (S3)
++ pgvector     + PostgreSQL
++ metadata     (image refs)
+```
 
-                     │
-                     │
-                     ▼
-                  Docling
-                     │
-          ┌──────────┴──────────┐
-          │                     │
-          ▼                     ▼
-   Text / Tables          Extracted Images
-          │                     │
-          ▼                     ▼
-   PostgreSQL              Garage
-   + pgvector              + PostgreSQL
-   + metadata              + image references
+**Text / Tables path**
 
-Text/Tables Path:
-Documents
+```
+Documents → Docling → Structured Document Tree
+  → Sections / Subsections / Tables
+  → PostgreSQL (source of truth) + pgvector vectors + BM25 index
+```
 
-   ↓
+**Images path**
 
-Docling
+```
+Documents → Docling → Extracted Images
+  → Garage (S3-compatible storage) + PostgreSQL (image metadata references)
+```
 
-   ↓
+### Query (online)
 
-Structured Document Tree
-
-   ↓
-
-Sections / Subsections / Tables
-
-   ↓
-
-PostgreSQL (source of truth) + pgvector vectors + BM25 index
-
-Images Path:
-Documents
-
-   ↓
-
-Docling
-
-   ↓
-
-Extracted Images
-
-   ↓
-
-Garage (S3-compatible storage) + PostgreSQL (image metadata references)
-
-Query (online)
+```
 USER QUESTION
        ↓
 Query Understanding                    app/query_understand.py
@@ -87,9 +76,11 @@ LangGraph retrieve → generate          app/langgraph_rag.py
 LangChain + Qwen                       app/llm.py (Hugging Face router, HF_TOKEN)
        ↓
 Grounded Answer
+```
 
-MCP Interface
-The RAG pipeline is also exposed as an MCP server using FastMCP.
+### MCP Interface
+
+```
 AI Client
    ↓
 MCP Client
@@ -107,104 +98,132 @@ RAG tools
 Existing RAG pipeline
    ↓
 LangGraph → Retrieval → Qwen
+```
 
-Stage	What it does	Code
-Query Understanding	Classifies query type, scope, concepts; sets expansion flags	app/query_understand.py
-Dense + BM25	Parallel vector and lexical search over indexed nodes	app/index.py
-RRF Fusion	Reciprocal Rank Fusion merges rank lists	app/retrieve.py
-Reranker	Re-scores fused candidates with embedding similarity	app/retrieve.py
-Hierarchical Expansion	Walks hit → parent section; adds siblings and children per plan	app/retrieve.py
-Table Retrieval	Pulls table nodes from hits and expanded sections	app/retrieve.py
-Context Organizer	Orders blocks (parent / sibling / child / table) into structured context	app/retrieve.py
-LangGraph	Orchestrates retrieve → generate	app/langgraph_rag.py
-LangChain + Qwen	Grounded generation from structured context only	app/llm.py
-The web UI and API return a flow object with one entry per stage so you can inspect hits, fusion scores, expansions, and the final context.
-Features
-Structure-aware ingest (headings and tables, not sliding-window chunks)
-Image extraction and storage: Extracts images from PDFs using Docling and stores them in Garage with PostgreSQL metadata references
-Query understanding (type, scope, concepts) drives expansion and BM25 query shaping
-PostgreSQL as the source of truth for document trees and image metadata
-Hybrid search: dense (pgvector + sentence-transformers) + lexical (BM25), fused with RRF
-Hierarchical expansion: parent section, siblings, children, and dedicated table retrieval
-Context organizer packs labeled blocks under a character budget
-Query flow payload so each pipeline stage is visible in the API response
-Optional document_id filter
-Valkey / Redis cache for retrieval results
-LLM via Hugging Face router (https://router.huggingface.co/v1), default model Qwen, orchestrated with LangGraph and LangChain (HF_TOKEN)
-MCP interface using FastMCP
-MCP tools for querying, retrieval, document access, and health checks
-AI agent that uses MCP tools with LLM function calling for grounded answers
-Temporal.io integration for durable workflow execution with automatic retries and crash recovery
-Stack
-Layer	Technology
-API	FastAPI + Uvicorn
-MCP	FastMCP
-Parse	Docling
-ORM	SQLAlchemy
-Migrations	Alembic
-Store	PostgreSQL (documents, nodes, images)
-Image Storage	Garage (S3-compatible)
-Vectors	pgvector + sentence-transformers
-Lexical	rank-bm25
-Cache	Valkey (Redis protocol)
-LLM	Hugging Face Inference Router via LangChain ChatOpenAI (HF_TOKEN)
-Orchestration	LangGraph (retrieve → generate) + Temporal (durable workflows)
-Observability	OpenTelemetry + Arize Phoenix
-Evaluation	RAGAS + DeepEval
-Repository layout
+### Pipeline stages
+
+| Stage | What it does | Code |
+|-------|--------------|------|
+| Query Understanding | Classifies query type, scope, concepts; sets expansion flags | `app/query_understand.py` |
+| Dense + BM25 | Parallel vector and lexical search over indexed nodes | `app/index.py` |
+| RRF Fusion | Reciprocal Rank Fusion merges rank lists | `app/retrieve.py` |
+| Reranker | Re-scores fused candidates with embedding similarity | `app/retrieve.py` |
+| Hierarchical Expansion | Walks hit → parent section; adds siblings and children per plan | `app/retrieve.py` |
+| Table Retrieval | Pulls table nodes from hits and expanded sections | `app/retrieve.py` |
+| Context Organizer | Orders blocks (parent / sibling / child / table) into structured context | `app/retrieve.py` |
+| LangGraph | Orchestrates retrieve → generate | `app/langgraph_rag.py` |
+| LangChain + Qwen | Grounded generation from structured context only | `app/llm.py` |
+
+The web UI and API return a `flow` object with one entry per stage so you can inspect hits, fusion scores, expansions, and the final context.
+
+---
+
+## Features
+
+- **Structure-aware ingest** — headings and tables, not sliding-window chunks
+- **Image extraction and storage** — Docling extracts images; Garage stores them; PostgreSQL holds metadata references
+- **Query understanding** — type, scope, and concepts drive expansion and BM25 query shaping
+- **PostgreSQL as source of truth** for document trees and image metadata
+- **Hybrid search** — dense (pgvector + sentence-transformers) + lexical (BM25), fused with RRF
+- **Hierarchical expansion** — parent section, siblings, children, and dedicated table retrieval
+- **Context organizer** — packs labeled blocks under a character budget
+- **Query flow payload** — every pipeline stage is visible in the API response
+- **Optional `document_id` filter**
+- **Valkey / Redis cache** for retrieval results
+- **LLM via Hugging Face router** (`https://router.huggingface.co/v1`), default model Qwen, orchestrated with LangGraph and LangChain (`HF_TOKEN`)
+- **MCP interface** using FastMCP
+- **MCP tools** for querying, retrieval, document access, and health checks
+- **AI agent** that uses MCP tools with LLM function calling for grounded answers
+- **Temporal.io** integration for durable workflow execution with automatic retries and crash recovery
+
+---
+
+## Stack
+
+| Layer | Technology |
+|-------|------------|
+| API | FastAPI + Uvicorn |
+| MCP | FastMCP |
+| Parse | Docling |
+| ORM | SQLAlchemy |
+| Migrations | Alembic |
+| Store | PostgreSQL (documents, nodes, images) |
+| Image Storage | Garage (S3-compatible) |
+| Vectors | pgvector + sentence-transformers |
+| Lexical | rank-bm25 |
+| Cache | Valkey (Redis protocol) |
+| LLM | Hugging Face Inference Router via LangChain ChatOpenAI (`HF_TOKEN`) |
+| Orchestration | LangGraph (retrieve → generate) + Temporal (durable workflows) |
+| Observability | OpenTelemetry + Arize Phoenix |
+| Evaluation | RAGAS + DeepEval |
+
+---
+
+## Repository layout
+
+```
 app/
-  main.py              FastAPI routes: /, /health, /documents, /ingest, /query
-  my_server.py         FastMCP MCP server and RAG tools
-  agent.py             AI agent that uses MCP tools with Qwen LLM
-  test_agent.py        Test script for MCP server connectivity
-  ingest.py            Docling PDF → structured nodes + images
-  query_understand.py  Query type, scope, concepts, expansion plan
-  db.py                Postgres schema and queries (documents, nodes, images)
-  models.py             SQLAlchemy ORM models
-  index.py              pgvector + BM25 index
-  pgvector_search.py   pgvector-based vector search
-  retrieve.py           Hybrid search, RRF, rerank, hierarchy, tables, context, flow
-  langgraph_rag.py      LangGraph retrieve → generate
-  llm.py                LangChain ChatOpenAI on Hugging Face router (Qwen)
-  cache.py              Valkey
-  config.py             Environment
-  garage_client.py      Garage (S3-compatible) client for image storage
-  telemetry.py          OpenTelemetry instrumentation with Phoenix
-  evaluation.py         RAGAS evaluation metrics
-  temporal_activities.py Temporal activities for durable execution
-  temporal_workflows.py Temporal workflows (IngestWorkflow, QueryWorkflow)
-  temporal_worker.py    Temporal worker process
+  main.py                 FastAPI routes: /, /health, /documents, /ingest, /query
+  my_server.py            FastMCP MCP server and RAG tools
+  agent.py                AI agent that uses MCP tools with Qwen LLM
+  test_agent.py           Test script for MCP server connectivity
+  ingest.py               Docling PDF → structured nodes + images
+  query_understand.py     Query type, scope, concepts, expansion plan
+  db.py                   Postgres schema and queries (documents, nodes, images)
+  models.py               SQLAlchemy ORM models
+  index.py                pgvector + BM25 index
+  pgvector_search.py      pgvector-based vector search
+  retrieve.py             Hybrid search, RRF, rerank, hierarchy, tables, context, flow
+  langgraph_rag.py        LangGraph retrieve → generate
+  llm.py                  LangChain ChatOpenAI on Hugging Face router (Qwen)
+  cache.py                Valkey
+  config.py               Environment
+  garage_client.py        Garage (S3-compatible) client for image storage
+  telemetry.py            OpenTelemetry instrumentation with Phoenix
+  evaluation.py           RAGAS evaluation metrics
+  temporal_activities.py  Temporal activities for durable execution
+  temporal_workflows.py   Temporal workflows (IngestWorkflow, QueryWorkflow)
+  temporal_worker.py      Temporal worker process
 
 alembic/
-  env.py                Alembic environment configuration
-  script.py.mako        Migration script template
-  versions/             Database migration files
+  env.py                  Alembic environment configuration
+  script.py.mako          Migration script template
+  versions/               Database migration files
 
 scripts/
-  ingest_pdf.py         CLI ingest
-  check_services.py     Postgres / Valkey / Garage ping
-  start_phoenix.py     Start Phoenix observability server
+  ingest_pdf.py           CLI ingest
+  check_services.py       Postgres / Valkey / Garage ping
+  start_phoenix.py        Start Phoenix observability server
 
 tests/
   test_rag_evaluation.py  DeepEval pytest tests for CI/CD
 
-.env.example            Copy to .env (never commit .env)
+.env.example              Copy to .env (never commit .env)
 requirements.txt
-alembic.ini             Alembic configuration
+alembic.ini               Alembic configuration
+```
 
-Prerequisites
-uv
-Python 3.10+
-PostgreSQL on localhost:5432
-Valkey or Redis on 127.0.0.1:6379 (optional but recommended)
-Docker (for Garage storage)
-A Hugging Face access token (HF_TOKEN) for generation (retrieval still works without it)
-Temporal Server (optional, for durable workflow execution)
-Database
+---
+
+## Prerequisites
+
+- [uv](https://github.com/astral-sh/uv)
+- Python 3.10+
+- PostgreSQL on `localhost:5432`
+- Valkey or Redis on `127.0.0.1:6379` (optional but recommended)
+- Docker (for Garage storage)
+- A Hugging Face access token (`HF_TOKEN`) for generation (retrieval still works without it)
+- Temporal Server (optional, for durable workflow execution)
+
+### Database
+
+```sql
 CREATE DATABASE rag;
+```
 
-Tables are managed by Alembic migrations for version control and easy schema updates.
-Run migrations:
+Tables are managed by Alembic migrations.
+
+```bash
 # Apply all pending migrations
 uv run alembic upgrade head
 
@@ -213,99 +232,124 @@ uv run alembic revision --autogenerate -m "Description of changes"
 
 # Rollback to previous migration
 uv run alembic downgrade -1
+```
 
-Default URL (override in .env):
+Default URL (override in `.env`):
+
+```
 postgresql://postgres:1234@localhost:5432/rag
+```
 
-If that user is rejected, the app also tries postgresql://1234:1234@localhost:5432/rag.
-Garage (S3-Compatible Storage)
-Garage is used for storing extracted images from PDFs.
-Default configuration (override in .env):
+If that user is rejected, the app also tries `postgresql://1234:1234@localhost:5432/rag`.
+
+### Garage (S3-compatible storage)
+
+Garage stores extracted images from PDFs.
+
+Default configuration (override in `.env`):
+
+```
 GARAGE_ENDPOINT=http://localhost:3900
 GARAGE_ACCESS_KEY=<generated-access-key>
 GARAGE_SECRET_KEY=<generated-secret-key>
 GARAGE_SECURE=false
 GARAGE_BUCKET=rag-documents
 GARAGE_REGION=garage
+```
 
-Start Garage with Docker Compose:
+**Start Garage with Docker Compose:**
+
+```bash
 docker compose up -d garage
+```
 
-Check the Garage node:
+**Initialize Garage:**
+
+```bash
+# Check the Garage node
 docker exec garage /garage status
 
-Initialize the Garage layout using the node ID shown by garage status:
+# Assign layout (use the NODE_ID from status)
 docker exec garage /garage layout assign <NODE_ID> -z dc1 -c 1G
 docker exec garage /garage layout show
 
-Apply the pending layout version shown by layout show:
+# Apply the pending layout version
 docker exec garage /garage layout apply --version <PENDING_VERSION>
 
-Create the access key:
+# Create access key
 docker exec garage /garage key create rag-app
 docker exec garage /garage key list
 
-Create the bucket:
+# Create bucket
 docker exec garage /garage bucket create rag-documents
 
-Allow the key to access the bucket:
+# Allow the key to access the bucket
 docker exec garage /garage bucket allow --read --write --owner rag-documents --key rag-app
 
-Check the bucket:
+# Verify
 docker exec garage /garage bucket info rag-documents
+```
 
-Garage will be available at:
-S3 API: http://localhost:3900
-Web UI: http://localhost:3902
-Valkey (optional but recommended)
+Garage endpoints:
+
+- S3 API: `http://localhost:3900`
+- Web UI: `http://localhost:3902`
+
+### Valkey (optional but recommended)
+
 Query results are cached when Valkey/Redis is reachable.
+
 On WSL, bind so Windows can connect:
+
+```bash
 valkey-server --bind 0.0.0.0 --port 6379 --protected-mode no
+```
 
-Or set VALKEY_URL to the WSL IP from wsl hostname -I.
-Setup
+Or set `VALKEY_URL` to the WSL IP from `wsl hostname -I`.
+
+---
+
+## Setup
+
+```bash
 git clone <your-repo-url>
-
 cd rag
+```
 
-Quick Start with Garage (Docker):
-Windows:
-# Start Garage
+### Quick start with Garage (Docker)
+
+```bash
 docker compose up -d garage
+```
 
-Linux / macOS:
-# Start Garage
-docker compose up -d garage
+Then initialize the Garage layout, create the `rag-app` access key, create the `rag-documents` bucket, allow the key, and update `.env` with your Garage credentials (see above).
 
-After starting Garage:
-Initialize the Garage layout.
-Create the rag-app access key.
-Create a bucket named rag-documents.
-Allow the key to access the bucket.
-Update .env with your Garage credentials.
-Application Setup:
-Windows (PowerShell)
+### Application setup
+
+**Windows (PowerShell)**
+
+```powershell
 uv venv
-
 .\.venv\Scripts\Activate.ps1
-
 uv pip install -r requirements.txt
-
 copy .env.example .env
+```
 
-Linux / macOS
+**Linux / macOS**
+
+```bash
 uv venv
-
 source .venv/bin/activate
-
 uv pip install -r requirements.txt
-
 cp .env.example .env
+```
 
-Edit .env and set HF_TOKEN. Do not commit .env.
-Database Migrations
-The project uses Alembic for database schema management:
-# Apply all pending migrations (after initial setup)
+Edit `.env` and set `HF_TOKEN`. **Do not commit `.env`.**
+
+### Database migrations
+
+```bash
+# Apply all pending migrations
 uv run alembic upgrade head
 
 # Create a new migration after changing models.py
@@ -316,168 +360,240 @@ uv run alembic history
 
 # Rollback to previous migration
 uv run alembic downgrade -1
+```
 
-Note: If you have an existing database with tables created by the old manual schema, the initial migration will safely skip creating existing tables.
-Environment variables
-Variable	Purpose
-DATABASE_URL	PostgreSQL connection string
-VALKEY_URL	Redis-compatible cache URL
-HF_TOKEN	Hugging Face token (used as OpenAI-compatible api_key)
-OPENAI_BASE_URL	Default https://router.huggingface.co/v1
-OPENAI_MODEL	Default Qwen/Qwen3.5-9B (hosted on the HF router)
-LLM_MAX_TOKENS	Generation cap (default 2048)
-LLM_TEMPERATURE	Default 0.7
-LLM_TOP_P	Default 0.8
-LLM_PRESENCE_PENALTY	Default 1.5
-LLM_TOP_K	Passed as extra_body.top_k (default 20)
-EMBEDDING_MODEL	Default sentence-transformers/all-MiniLM-L6-v2
-CACHE_TTL_SECONDS	Default 3600
-TEMPORAL_HOST	Temporal server host (default localhost)
-TEMPORAL_PORT	Temporal server port (default 7233)
-TEMPORAL_NAMESPACE	Temporal namespace (default default)
-TEMPORAL_TASK_QUEUE	Temporal task queue (default rag-task-queue)
-GARAGE_ENDPOINT	Garage server endpoint (default http://localhost:3900)
-GARAGE_ACCESS_KEY	Garage access key
-GARAGE_SECRET_KEY	Garage secret key
-GARAGE_SECURE	Use HTTPS for Garage (default false)
-GARAGE_BUCKET	Garage bucket name (default rag-documents)
-GARAGE_REGION	Garage region (default garage)
-Qwen/Qwen3.5-0.9B is available on the Hugging Face Inference Router. That checkpoint is for local vLLM / SGLang server.
+> **Note:** If you have an existing database with tables created by the old manual schema, the initial migration will safely skip creating existing tables.
+
+---
+
+## Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `DATABASE_URL` | PostgreSQL connection string |
+| `VALKEY_URL` | Redis-compatible cache URL |
+| `HF_TOKEN` | Hugging Face token (used as OpenAI-compatible `api_key`) |
+| `OPENAI_BASE_URL` | Default `https://router.huggingface.co/v1` |
+| `OPENAI_MODEL` | Default `Qwen/Qwen3.5-9B` (hosted on the HF router) |
+| `LLM_MAX_TOKENS` | Generation cap (default `2048`) |
+| `LLM_TEMPERATURE` | Default `0.7` |
+| `LLM_TOP_P` | Default `0.8` |
+| `LLM_PRESENCE_PENALTY` | Default `1.5` |
+| `LLM_TOP_K` | Passed as `extra_body.top_k` (default `20`) |
+| `EMBEDDING_MODEL` | Default `sentence-transformers/all-MiniLM-L6-v2` |
+| `CACHE_TTL_SECONDS` | Default `3600` |
+| `TEMPORAL_HOST` | Temporal server host (default `localhost`) |
+| `TEMPORAL_PORT` | Temporal server port (default `7233`) |
+| `TEMPORAL_NAMESPACE` | Temporal namespace (default `default`) |
+| `TEMPORAL_TASK_QUEUE` | Temporal task queue (default `rag-task-queue`) |
+| `GARAGE_ENDPOINT` | Garage server endpoint (default `http://localhost:3900`) |
+| `GARAGE_ACCESS_KEY` | Garage access key |
+| `GARAGE_SECRET_KEY` | Garage secret key |
+| `GARAGE_SECURE` | Use HTTPS for Garage (default `false`) |
+| `GARAGE_BUCKET` | Garage bucket name (default `rag-documents`) |
+| `GARAGE_REGION` | Garage region (default `garage`) |
+
+### Local Qwen (optional)
+
+`Qwen/Qwen3.5-0.9B` is available on the Hugging Face Inference Router. For a local vLLM / SGLang server:
+
+```
 OPENAI_BASE_URL=http://127.0.0.1:8001/v1
-
 OPENAI_MODEL=Qwen/Qwen3.5-0.9B
+```
 
-(Keep the RAG API on port 8000.)
-Run
+(Keep the RAG API on port `8000`.)
+
+---
+
+## Run
+
+```bash
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
 
-Open:
-UI: http://127.0.0.1:8000/
-Docs: http://127.0.0.1:8000/docs
-Restart Uvicorn after changing .env (--reload does not always reload environment files).
-Temporal Setup (Optional)
-Temporal provides durable workflow execution with automatic retries and crash recovery. The RAG API will automatically use Temporal if available, otherwise it falls back to direct execution.
-Install Temporal CLI
+- **UI:** http://127.0.0.1:8000/
+- **Docs:** http://127.0.0.1:8000/docs
+
+Restart Uvicorn after changing `.env` (`--reload` does not always reload environment files).
+
+---
+
+## Temporal setup (optional)
+
+Temporal provides durable workflow execution with automatic retries and crash recovery. The RAG API automatically uses Temporal if available; otherwise it falls back to direct execution.
+
+### Install Temporal CLI
+
+```bash
 # macOS
 brew install temporal
 
 # Linux
 curl -sSf https://temporal.io/cli.sh | sh
 
-# Windows
-# Download from https://temporal.io/cli
+# Windows — download from https://temporal.io/cli
+```
 
-Start Temporal Server
-# Start a local Temporal server (single-node for development)
+### Start Temporal server
+
+```bash
+# Local single-node for development
 temporal server start-dev
 
-# Or use Docker
+# Or Docker
 docker run --rm -p 7233:7233 temporalio/server:latest
+```
 
-Start Temporal Worker
-In a separate terminal, start the Temporal worker to execute workflows:
+### Start Temporal worker
+
+In a separate terminal:
+
+```bash
 uv run python -m app.temporal_worker
+```
 
-The worker will:
-Connect to Temporal at localhost:7233
-Listen on the rag-task-queue
-Execute ingest and query workflows
-Temporal Benefits
-Crash Recovery: If the FastAPI server crashes during ingest/query, Temporal automatically resumes the workflow from the last completed activity
-Automatic Retries: Failed activities are automatically retried with configurable policies
-Visibility: Monitor workflow execution in the Temporal web UI at http://localhost:8233
-Durable Execution: Workflows survive server restarts and network failures
-Without Temporal
-If Temporal is not running, the API automatically falls back to direct execution. All functionality remains available, but without the durability guarantees provided by Temporal.
-API
-Method	Path	Description
-GET	/health	Postgres, Valkey, and Garage ping
-GET	/documents	Indexed documents
-GET	/documents/{document_id}/images	Get images for a document
-POST	/ingest	Multipart PDF (file)
-POST	/query	Question + optional document_id
-MCP Server
-The project exposes the Structure-Aware RAG pipeline through the Model Context Protocol (MCP) using FastMCP.
-The MCP server provides an interface for MCP-compatible AI clients to interact with the RAG system without directly calling the FastAPI /query endpoint.
-MCP tools
-Tool	Description
-query_document	Runs the complete RAG pipeline: retrieval → hierarchy → context → LangGraph → generation
-retrieve_document_context	Runs retrieval only and returns query planning, retrieved sections, tables, and structured context
-get_document	Retrieves metadata for a document using its document_id
-get_document_images	Retrieves all images extracted from a document with Garage references
-cache_health	Checks Valkey and Garage availability
-rag_health	Returns basic RAG service health information
-MCP transport
-The MCP server uses stdio transport. The client spawns the server as a subprocess and communicates via stdin/stdout.
-Start MCP server
-uv run python -m app.my_server
+The worker connects to Temporal at `localhost:7233`, listens on `rag-task-queue`, and executes ingest and query workflows.
 
-Ingest
+### Benefits
+
+- **Crash recovery** — if the FastAPI server crashes mid-ingest/query, Temporal resumes from the last completed activity
+- **Automatic retries** — failed activities are retried with configurable policies
+- **Visibility** — monitor workflows in the Temporal web UI at http://localhost:8233
+- **Durable execution** — workflows survive server restarts and network failures
+
+Without Temporal, the API falls back to direct execution. All functionality remains available, without the durability guarantees.
+
+---
+
+## API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Postgres, Valkey, and Garage ping |
+| `GET` | `/documents` | Indexed documents |
+| `GET` | `/documents/{document_id}/images` | Get images for a document |
+| `POST` | `/ingest` | Multipart PDF (`file`) |
+| `POST` | `/query` | Question + optional `document_id` |
+
+### Ingest
+
+```bash
 curl -F "file=@./paper.pdf" http://127.0.0.1:8000/ingest
+```
 
-AI Agent
-The project includes an AI agent (app/agent.py) that connects to the MCP server and uses an LLM (Qwen via Hugging Face) to answer questions using the RAG tools.
-The agent:
-Spawns the MCP server process using stdio transport
-Retrieves available MCP tools
-Converts MCP tools to OpenAI-compatible function calling format
-Uses Qwen (via Hugging Face router) to decide which tools to call
-Executes MCP tools and returns grounded answers
-Run AI Agent
-Start the MCP server first:
-uv run python -m app.my_server
+CLI alternative:
 
-In a separate terminal, run the AI agent:
-uv run python -m app.agent
-
-The agent will prompt for a question and use the MCP tools to answer it.
-Test MCP Connection
-To verify MCP server connectivity and list available tools:
-uv run python -m app.test_agent
-
-This will output:
-Available MCP tools
-Tool descriptions
-Ingest
-CLI:
+```bash
 uv run python scripts/ingest_pdf.py ./paper.pdf
+```
 
-The response includes document_id. The original PDF is parsed once; the file is not required afterward.
-Query
+The response includes `document_id`. The original PDF is parsed once; the file is not required afterward.
+
+### Query
+
+```bash
 curl -X POST http://127.0.0.1:8000/query \
   -H "Content-Type: application/json" \
-  -d "{\"question\": \"What is the project title?\", \"document_id\": \"<uuid>\"}"
+  -d '{"question": "What is the project title?", "document_id": "<uuid>"}'
+```
 
-document_id is optional. Omit it to search the full corpus.
-Response fields:
-answer — grounded LLM output (or a skip/error message)
-query_plan — query type, scope, concepts, and expansion flags from query understanding
-sources — expanded sections (parent / siblings / children) used as context
-structured — ordered context blocks with role labels (parent, sibling, child, table, hit)
-context — structured text sent to Qwen
-flow — stage-by-stage pipeline trace (understand → vector → bm25 → hybrid → rerank → hierarchy → tables → context → llm)
-llm_skipped — true if generation was skipped or failed
-The model is instructed to answer only from retrieved sections. If the PDF never defines a term, the answer will say the context is insufficient instead of inventing a definition.
-Observability & Evaluation
-Arize Phoenix (OpenTelemetry Tracing)
-The application includes OpenTelemetry instrumentation with Arize Phoenix for distributed tracing and observability.
-Start Phoenix server:
+`document_id` is optional. Omit it to search the full corpus.
+
+**Response fields:**
+
+| Field | Description |
+|-------|-------------|
+| `answer` | Grounded LLM output (or a skip/error message) |
+| `query_plan` | Query type, scope, concepts, and expansion flags |
+| `sources` | Expanded sections (parent / siblings / children) used as context |
+| `structured` | Ordered context blocks with role labels (`parent`, `sibling`, `child`, `table`, `hit`) |
+| `context` | Structured text sent to Qwen |
+| `flow` | Stage-by-stage pipeline trace (`understand` → `vector` → `bm25` → `hybrid` → `rerank` → `hierarchy` → `tables` → `context` → `llm`) |
+| `llm_skipped` | `true` if generation was skipped or failed |
+
+The model is instructed to answer **only from retrieved sections**. If the PDF never defines a term, the answer will say the context is insufficient instead of inventing a definition.
+
+---
+
+## MCP server
+
+The project exposes the Structure-Aware RAG pipeline through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) using FastMCP.
+
+### MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `query_document` | Full RAG pipeline: retrieval → hierarchy → context → LangGraph → generation |
+| `retrieve_document_context` | Retrieval only: query planning, sections, tables, structured context |
+| `get_document` | Document metadata by `document_id` |
+| `get_document_images` | Images extracted from a document (Garage references) |
+| `cache_health` | Valkey and Garage availability |
+| `rag_health` | Basic RAG service health |
+
+### Transport
+
+The MCP server uses **stdio** transport. The client spawns the server as a subprocess and communicates via stdin/stdout.
+
+```bash
+uv run python -m app.my_server
+```
+
+### AI agent
+
+`app/agent.py` connects to the MCP server and uses Qwen (via Hugging Face) with function calling to answer questions using the RAG tools.
+
+1. Start the MCP server:
+
+   ```bash
+   uv run python -m app.my_server
+   ```
+
+2. In a separate terminal, run the agent:
+
+   ```bash
+   uv run python -m app.agent
+   ```
+
+The agent prompts for a question and uses the MCP tools to produce grounded answers.
+
+### Test MCP connection
+
+```bash
+uv run python -m app.test_agent
+```
+
+Lists available MCP tools and their descriptions.
+
+---
+
+## Observability & evaluation
+
+### Arize Phoenix (OpenTelemetry tracing)
+
+```bash
 uv run python scripts/start_phoenix.py
+```
 
-Phoenix UI will be available at http://localhost:6006.
-Configure Phoenix:
-Add to .env:
+Phoenix UI: http://localhost:6006
+
+Add to `.env`:
+
+```
 PHOENIX_ENDPOINT=http://localhost:6006
-
 PHOENIX_PROJECT_NAME=rag-evaluation
+```
 
-Tracing is automatically enabled when the RAG API starts. Phoenix captures:
-FastAPI request traces
-LangChain LLM calls
-Retrieval pipeline stages
-Custom spans for query understanding and context organization
-RAGAS Evaluation
-RAGAS provides comprehensive metrics for RAG system evaluation:
+Tracing is enabled automatically when the RAG API starts. Phoenix captures:
+
+- FastAPI request traces
+- LangChain LLM calls
+- Retrieval pipeline stages
+- Custom spans for query understanding and context organization
+
+### RAGAS evaluation
+
+```python
 from app.evaluation import RAGASEvaluator
 
 evaluator = RAGASEvaluator()
@@ -486,41 +602,54 @@ results = evaluator.evaluate_dataset(
     questions=["question1", "question2"],
     answers=["answer1", "answer2"],
     contexts=[["context1"], ["context2"]],
-    ground_truths=["truth1", "truth2"]
+    ground_truths=["truth1", "truth2"],
 )
+```
 
-Available metrics:
-Faithfulness: Measures if answers are grounded in retrieved context
-Answer Relevance: Measures if answers address the user's question
-Context Precision: Measures if retrieved context is relevant
-Context Recall: Measures if all relevant information was retrieved
-DeepEval CI/CD Testing
-DeepEval provides pytest-based tests for continuous quality assurance:
-# Run evaluation tests
+**Metrics:**
+
+- **Faithfulness** — answers grounded in retrieved context
+- **Answer Relevance** — answers address the user's question
+- **Context Precision** — retrieved context is relevant
+- **Context Recall** — all relevant information was retrieved
+
+### DeepEval CI/CD testing
+
+```bash
 uv run pytest tests/test_rag_evaluation.py -v
+```
 
-Tests include:
-Faithfulness verification
-Answer relevancy checks
-Contextual relevancy validation
-Comprehensive pipeline quality tests
-CI/CD Integration:
-The .github/workflows/ci.yml file includes a GitHub Actions workflow that:
-Runs DeepEval tests on every push/PR
-Executes RAGAS evaluation (when HF_TOKEN is available)
-Ensures RAG quality gates before deployment
-Set secrets in GitHub:
-HF_TOKEN: Hugging Face token for LLM access
-What is stored where
-Store	Role
-PostgreSQL	Document metadata + full node text + vector embeddings + image metadata references
-Garage	Extracted images from PDFs (stored as binary objects)
-data/bm25.pkl	BM25 corpus (gitignored). Generated from PostgreSQL nodes.
-Valkey	Cached retrieval JSON
-Deleting the source PDF on disk does not remove the document from Postgres. Query still works until you delete the documents row (nodes and images cascade via ON DELETE CASCADE) and rebuild indexes.
-Rebuilding BM25
-Because bm25.pkl is a local derived artifact generated from PostgreSQL nodes, you should regenerate it whenever your PostgreSQL document corpus changes (e.g. after ingest or deletion):
+Tests cover faithfulness, answer relevancy, contextual relevancy, and end-to-end pipeline quality.
+
+The `.github/workflows/ci.yml` workflow runs DeepEval on every push/PR and RAGAS evaluation when `HF_TOKEN` is available.
+
+Set the GitHub secret:
+
+- `HF_TOKEN` — Hugging Face token for LLM access
+
+---
+
+## What is stored where
+
+| Store | Role |
+|-------|------|
+| **PostgreSQL** | Document metadata + full node text + vector embeddings + image metadata references |
+| **Garage** | Extracted images from PDFs (binary objects) |
+| **data/bm25.pkl** | BM25 corpus (gitignored). Generated from PostgreSQL nodes. |
+| **Valkey** | Cached retrieval JSON |
+
+Deleting the source PDF on disk does **not** remove the document from Postgres. Query still works until you delete the `documents` row (nodes and images cascade via `ON DELETE CASCADE`) and rebuild indexes.
+
+### Rebuilding BM25
+
+`bm25.pkl` is a local derived artifact. Regenerate it whenever the PostgreSQL document corpus changes (after ingest or deletion):
+
+```bash
 uv run python scripts/rebuild_bm25.py
+```
 
-License
+---
+
+## License
+
 Add a license file if you want others to reuse this project (for example MIT).
