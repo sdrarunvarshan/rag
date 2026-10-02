@@ -48,7 +48,7 @@ TEMPORAL_NAMESPACE = os.getenv("TEMPORAL_NAMESPACE", "default")
 TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "rag-task-queue")
 
 # Garage (S3-compatible storage) configuration
-GARAGE_ENDPOINT = os.getenv("GARAGE_ENDPOINT", "http://localhost:3900")
+GARAGE_ENDPOINT = os.getenv("GARAGE_ENDPOINT", "localhost:3900")
 GARAGE_ACCESS_KEY = os.getenv("GARAGE_ACCESS_KEY", "garage-key")
 GARAGE_SECRET_KEY = os.getenv("GARAGE_SECRET_KEY", "garage-secret")
 GARAGE_SECURE = os.getenv("GARAGE_SECURE", "false").lower() == "true"

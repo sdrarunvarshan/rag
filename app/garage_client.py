@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from io import BytesIO
-from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from minio import Minio
@@ -22,11 +23,21 @@ log = logging.getLogger(__name__)
 _client: Minio | None = None
 
 
+def _s3_endpoint(endpoint: str) -> str:
+    """MinIO's client accepts host:port only. URLs like http://localhost:3900 are rejected."""
+    raw = (endpoint or "").strip()
+    if "://" in raw:
+        parsed = urlparse(raw)
+        if parsed.netloc:
+            return parsed.netloc
+    return raw.split("/")[0]
+
+
 def _get_client() -> Minio:
     global _client
     if _client is None:
         _client = Minio(
-            GARAGE_ENDPOINT,
+            _s3_endpoint(GARAGE_ENDPOINT),
             access_key=GARAGE_ACCESS_KEY,
             secret_key=GARAGE_SECRET_KEY,
             secure=GARAGE_SECURE,
@@ -81,7 +92,7 @@ def get_image_url(object_key: str, expires_in_hours: int = 24) -> str:
         url = client.presigned_get_object(
             GARAGE_BUCKET,
             object_key,
-            expires=expires_in_hours * 3600,
+            expires=timedelta(hours=expires_in_hours),
         )
         return url
     except S3Error as exc:
@@ -130,6 +141,6 @@ def ping() -> bool:
         client = _get_client()
         client.list_buckets()
         return True
-    except S3Error as exc:
+    except Exception as exc:
         log.warning("Garage ping failed: %s", exc)
         return False
