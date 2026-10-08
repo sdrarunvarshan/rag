@@ -124,7 +124,9 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 ## Features
 
 - **Structure-aware ingest** — headings and tables, not sliding-window chunks
-- **Image extraction and storage** — Docling extracts images; Garage stores them; PostgreSQL holds metadata references
+- **User Authentication** — JWT-based authentication securely protects the application's core endpoints
+- **Complete Document Deletion** — Safely removes rows from Postgres (with cascade), purges related S3 objects in Garage, and dynamically rebuilds the BM25 index
+- **Image extraction and storage** — Docling extracts images; Garage stores them via a robust `boto3` client; PostgreSQL holds metadata references
 - **Query understanding** — type, scope, and concepts drive expansion and BM25 query shaping
 - **PostgreSQL as source of truth** for document trees and image metadata
 - **Hybrid search** — dense (pgvector + sentence-transformers) + lexical (BM25), fused with RRF
@@ -384,6 +386,9 @@ uv run alembic downgrade -1
 | Variable | Purpose |
 |----------|---------|
 | `DATABASE_URL` | PostgreSQL connection string |
+| `JWT_SECRET_KEY` | Secret key for JWT token generation |
+| `JWT_ALGORITHM` | JWT signing algorithm (default `HS256`) |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | Token expiration duration (default `60`) |
 | `VALKEY_URL` | Redis-compatible cache URL |
 | `HF_TOKEN` | Hugging Face token (used as OpenAI-compatible `api_key`) |
 | `OPENAI_BASE_URL` | Default `https://router.huggingface.co/v1` |
@@ -483,13 +488,17 @@ Without Temporal, the API falls back to direct execution. All functionality rema
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `POST` | `/auth/register` | Register a new user |
+| `POST` | `/auth/login` | Login and receive a JWT access token |
+| `GET` | `/auth/me` | Get current authenticated user details (Protected) |
 | `GET` | `/health` | Postgres, Valkey, and Garage ping |
-| `GET` | `/documents` | Indexed documents |
-| `GET` | `/documents/{document_id}/images` | Get images for a document |
+| `GET` | `/documents` | Indexed documents (Protected, requires Bearer token) |
+| `DELETE` | `/documents/{document_id}` | Complete deletion from Postgres and Garage (Protected) |
+| `GET` | `/documents/{document_id}/images` | Get images for a document (Protected) |
 | `GET` | `/images/{image_id}` | Serve raw image file or redirect to storage |
-| `POST` | `/ingest` | Multipart PDF (`file`) |
-| `POST` | `/query` | Question + optional `document_id` (complete response) |
-| `POST` | `/query/stream` | Question + optional `document_id` (SSE stream: retrieved → tokens → done) |
+| `POST` | `/ingest` | Multipart PDF (`file`) (Protected) |
+| `POST` | `/query` | Question + optional `document_id` (complete response, Protected) |
+| `POST` | `/query/stream` | Question + optional `document_id` (SSE stream: retrieved → tokens → done, Protected) |
 
 ### Ingest
 

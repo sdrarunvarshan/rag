@@ -55,6 +55,11 @@ GARAGE_SECURE = os.getenv("GARAGE_SECURE", "false").lower() == "true"
 GARAGE_BUCKET = os.getenv("GARAGE_BUCKET", "rag-documents")
 GARAGE_REGION = os.getenv("GARAGE_REGION", "garage")
 
+# JWT Authentication configuration
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "rag-jwt-secret-key-change-in-production-2026")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+
 TOP_K_VECTOR = int(os.getenv("TOP_K_VECTOR", "20"))
 TOP_K_BM25 = int(os.getenv("TOP_K_BM25", "20"))
 RRF_K = int(os.getenv("RRF_K", "60"))

@@ -8,12 +8,23 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from temporalio.client import Client
 
 from app import cache, db
+from app.auth import (
+    TokenResponse,
+    UserLogin,
+    UserRegister,
+    UserResponse,
+    create_access_token,
+    get_current_user,
+    get_optional_user,
+    hash_password,
+    verify_password,
+)
 from app.config import (
     TEMPORAL_HOST,
     TEMPORAL_NAMESPACE,
@@ -22,11 +33,17 @@ from app.config import (
     UPLOAD_DIR,
     ensure_data_dirs,
 )
+from app.garage_client import (
+    delete_document_images,
+    ensure_bucket,
+    get_image_bytes,
+    get_image_url,
+    ping as garage_ping,
+)
 from app.index import hybrid_index
 from app.ingest import ingest_pdf
-from app.garage_client import ensure_bucket, get_image_bytes, get_image_url, ping as garage_ping
 from app.langgraph_rag import run_rag_pipeline, stream_rag_pipeline
-from app.telemetry import setup_telemetry, instrument_fastapi
+from app.telemetry import instrument_fastapi, setup_telemetry
 from app.temporal_workflows import IngestParams, IngestWorkflow, QueryParams, QueryWorkflow
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -114,6 +131,64 @@ class QueryResponse(BaseModel):
     structured: list[dict] = Field(default_factory=list)
 
 
+# --- Authentication Endpoints ---
+
+@app.post("/auth/register", response_model=TokenResponse)
+def register(body: UserRegister) -> TokenResponse:
+    if not db.ping():
+        raise HTTPException(status_code=503, detail="Postgres is not reachable")
+    existing = db.get_user_by_email(body.email)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this email address already exists",
+        )
+    hashed = hash_password(body.password)
+    user = db.create_user(body.email, hashed, body.full_name)
+    token = create_access_token({"sub": user["id"], "email": user["email"]})
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user=UserResponse(**user),
+    )
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(body: UserLogin) -> TokenResponse:
+    if not db.ping():
+        raise HTTPException(status_code=503, detail="Postgres is not reachable")
+    user = db.get_user_by_email(body.email)
+    if not user or not verify_password(body.password, user["hashed_password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = create_access_token({"sub": user["id"], "email": user["email"]})
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user=UserResponse(
+            id=user["id"],
+            email=user["email"],
+            full_name=user.get("full_name"),
+            created_at=user.get("created_at"),
+        ),
+    )
+
+
+@app.get("/auth/me", response_model=UserResponse)
+def me(current_user: dict = Depends(get_current_user)) -> UserResponse:
+    return UserResponse(
+        id=current_user["id"],
+        email=current_user["email"],
+        full_name=current_user.get("full_name"),
+        created_at=current_user.get("created_at"),
+    )
+
+
+# --- UI and Public Status ---
+
 @app.get("/")
 def home():
     if not UI_PAGE.is_file():
@@ -129,20 +204,71 @@ def health() -> dict:
     postgres = db.ping()
     valkey = cache.ping()
     garage = garage_ping()
-    status = "ok" if postgres and valkey and garage else "degraded"
-    return {"status": status, "postgres": postgres, "valkey": valkey, "garage": garage}
+    status_str = "ok" if postgres and valkey and garage else "degraded"
+    return {"status": status_str, "postgres": postgres, "valkey": valkey, "garage": garage}
 
+
+# --- Document Endpoints (Protected) ---
 
 @app.get("/documents")
-def documents() -> dict:
+def documents(current_user: dict = Depends(get_current_user)) -> dict:
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     items = db.list_documents()
     return {"documents": items}
 
 
+@app.delete("/documents/{document_id}")
+def delete_document_endpoint(
+    document_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """
+    Delete a document completely:
+    1. Removes all associated images from Garage S3 object store.
+    2. Deletes the document row from PostgreSQL (cascades to nodes, images, embeddings).
+    3. Rebuilds the hybrid index (BM25 + pgvector).
+    """
+    if not db.ping():
+        raise HTTPException(status_code=503, detail="Postgres is not reachable")
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
+    if not db.document_exists(doc_uuid):
+        raise HTTPException(status_code=404, detail="document_id not found")
+
+    # 1. Purge Garage object storage
+    try:
+        delete_document_images(doc_uuid)
+        log.info("Deleted images from Garage for document %s", doc_uuid)
+    except Exception as exc:
+        log.warning("Could not delete images from Garage (Garage may be down): %s", exc)
+
+    # 2. Delete from PostgreSQL (cascades to nodes & images)
+    deleted = db.delete_document(doc_uuid)
+    if not deleted:
+        raise HTTPException(status_code=500, detail="Failed to delete document from database")
+
+    # 3. Rebuild the BM25 search index to remove deleted document's nodes
+    try:
+        hybrid_index.rebuild_bm25()
+        log.info("BM25 index updated after deleting document %s", doc_uuid)
+    except Exception as exc:
+        log.warning("Failed to refresh hybrid index: %s", exc)
+
+    return {
+        "status": "deleted",
+        "document_id": document_id,
+        "message": "Document and all associated PostgreSQL and Garage data removed successfully",
+    }
+
+
 @app.get("/documents/{document_id}/images")
-def document_images(document_id: str) -> dict:
+def document_images(
+    document_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     try:
@@ -157,6 +283,7 @@ def document_images(document_id: str) -> dict:
 
 @app.get("/images/{image_id}")
 def image_file(image_id: str):
+    """Serve image bytes from Garage storage. Open for direct browser rendering."""
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     try:
@@ -181,7 +308,10 @@ def image_file(image_id: str):
 
 
 @app.post("/ingest")
-async def ingest(file: UploadFile = File(...)) -> dict:
+async def ingest(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Upload a PDF file")
     if not db.ping():
@@ -193,7 +323,6 @@ async def ingest(file: UploadFile = File(...)) -> dict:
         handle.write(payload)
         temp_path = Path(handle.name)
     try:
-        # Use Temporal workflow if available, otherwise fall back to direct execution
         if temporal_client:
             log.info("Using Temporal workflow for ingest")
             result = await temporal_client.execute_workflow(
@@ -226,12 +355,14 @@ def _resolved_document_id(document_id: str | None) -> str | None:
 
 
 @app.post("/query", response_model=QueryResponse)
-async def query(body: QueryRequest) -> QueryResponse:
+async def query(
+    body: QueryRequest,
+    current_user: dict = Depends(get_current_user),
+) -> QueryResponse:
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     resolved_doc_id = _resolved_document_id(body.document_id)
 
-    # Use Temporal workflow if available, otherwise fall back to direct execution
     if temporal_client:
         log.info("Using Temporal workflow for query")
         result = await temporal_client.execute_workflow(
@@ -240,7 +371,6 @@ async def query(body: QueryRequest) -> QueryResponse:
             id=f"query-{hash(body.question)}",
             task_queue=TEMPORAL_TASK_QUEUE,
         )
-        # Format Temporal result to match QueryResponse
         packed = {
             "answer": result["answer"],
             "cached": result["cached"],
@@ -260,13 +390,35 @@ async def query(body: QueryRequest) -> QueryResponse:
 
 
 @app.post("/query/stream")
-def query_stream(body: QueryRequest):
+def query_stream(
+    body: QueryRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Streaming SSE endpoint for real-time conversational chat response.
+    Yields:
+      - data: {"event": "retrieved", "sources": [...], "images": [...], ...}
+      - data: {"event": "token", "text": "..."}
+      - data: {"event": "done", "answer": "...", "flow": {...}, ...}
+    """
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     resolved_doc_id = _resolved_document_id(body.document_id)
 
     def event_generator():
-        for event in stream_rag_pipeline(body.question, resolved_doc_id):
-            yield f"data: {json.dumps(event)}\n\n"
+        try:
+            for event in stream_rag_pipeline(body.question, resolved_doc_id):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            log.exception("SSE streaming generation error")
+            yield f"data: {json.dumps({'event': 'error', 'detail': str(exc)})}\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

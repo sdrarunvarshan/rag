@@ -15,6 +15,6 @@ langchain
 langchain-openai
 langgraph
 fastmcp
-minio
+boto3
 sqlalchemy
 alembic

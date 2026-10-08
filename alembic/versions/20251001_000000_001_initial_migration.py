@@ -66,6 +66,18 @@ def upgrade() -> None:
     op.create_index('ix_images_document_id', 'images', ['document_id'])
     op.create_index('ix_images_node_id', 'images', ['node_id'])
 
+    # Create users table
+    op.create_table(
+        'users',
+        sa.Column('id', postgresql.UUID(as_uuid=True), server_default=sa.text('gen_random_uuid()'), primary_key=True),
+        sa.Column('email', sa.String(), nullable=False),
+        sa.Column('hashed_password', sa.String(), nullable=False),
+        sa.Column('full_name', sa.String(), nullable=True),
+        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+        sa.UniqueConstraint('email', name='uq_users_email')
+    )
+    op.create_index('ix_users_email', 'users', ['email'])
+
     # Add pgvector extension and embedding column (using raw SQL for pgvector type)
     try:
         op.execute('CREATE EXTENSION IF NOT EXISTS vector')
@@ -84,6 +96,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Drop indexes
     op.drop_index('idx_nodes_embedding', table_name='nodes')
+    op.drop_index('ix_users_email', table_name='users')
     op.drop_index('ix_images_node_id', table_name='images')
     op.drop_index('ix_images_document_id', table_name='images')
     op.drop_index('idx_nodes_type', table_name='nodes')
@@ -94,6 +107,7 @@ def downgrade() -> None:
     op.drop_column('nodes', 'embedding')
 
     # Drop tables
+    op.drop_table('users')
     op.drop_table('images')
     op.drop_table('nodes')
     op.drop_table('documents')

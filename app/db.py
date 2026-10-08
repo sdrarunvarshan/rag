@@ -4,7 +4,7 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Iterator
 from urllib.parse import urlparse, urlunparse
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.rows import dict_row
@@ -47,8 +47,7 @@ def get_session() -> Iterator[Session]:
         raise
     finally:
         session.close()
-_engine = None
-_session_maker = None
+
 
 
 def _auth_failed(exc: BaseException) -> bool:
@@ -139,6 +138,16 @@ SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type)",
     "CREATE INDEX IF NOT EXISTS idx_images_document_id ON images(document_id)",
     "CREATE INDEX IF NOT EXISTS idx_images_node_id ON images(node_id)",
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        hashed_password TEXT NOT NULL,
+        full_name TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
 )
 
 
@@ -401,6 +410,16 @@ def fetch_document(document_id: UUID) -> dict[str, Any] | None:
     }
 
 
+def delete_document(document_id: UUID) -> bool:
+    """Delete document from PostgreSQL. Child nodes and images cascade delete."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM documents WHERE id = %s", (document_id,))
+            deleted = cur.rowcount > 0
+        conn.commit()
+    return deleted
+
+
 def node_counts(document_id: UUID | None = None) -> dict[str, int]:
     sql = "SELECT node_type, COUNT(*) AS n FROM nodes"
     params: tuple[Any, ...] = ()
@@ -604,3 +623,71 @@ def vector_search(query_embedding: list[float], limit: int = 20, document_id: UU
         }
         for row in rows
     ]
+
+
+def create_user(email: str, hashed_password: str, full_name: str | None = None) -> dict[str, Any]:
+    user_id = uuid4()
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (id, email, hashed_password, full_name, created_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                RETURNING id, email, full_name, created_at
+                """,
+                (user_id, email.lower().strip(), hashed_password, full_name),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return {
+        "id": str(row["id"]),
+        "email": row["email"],
+        "full_name": row["full_name"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+def get_user_by_email(email: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, email, hashed_password, full_name, created_at
+            FROM users
+            WHERE email = %s
+            """,
+            (email.lower().strip(),),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": str(row["id"]),
+        "email": row["email"],
+        "hashed_password": row["hashed_password"],
+        "full_name": row["full_name"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+def get_user_by_id(user_id: UUID | str) -> dict[str, Any] | None:
+    try:
+        uid = UUID(str(user_id))
+    except ValueError:
+        return None
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, email, hashed_password, full_name, created_at
+            FROM users
+            WHERE id = %s
+            """,
+            (uid,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": str(row["id"]),
+        "email": row["email"],
+        "hashed_password": row["hashed_password"],
+        "full_name": row["full_name"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
