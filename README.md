@@ -271,6 +271,7 @@ If Docker reports "/etc/garage.toml" as a directory, remove the incorrectly crea
 
 docker compose down
 docker compose up -d garage»
+
 **Initialize Garage:**
 
 ```bash
