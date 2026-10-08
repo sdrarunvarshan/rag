@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from temporalio.client import Client
 
@@ -24,8 +24,8 @@ from app.config import (
 )
 from app.index import hybrid_index
 from app.ingest import ingest_pdf
-from app.garage_client import ensure_bucket, ping as garage_ping
-from app.langgraph_rag import run_rag_pipeline
+from app.garage_client import ensure_bucket, get_image_bytes, get_image_url, ping as garage_ping
+from app.langgraph_rag import run_rag_pipeline, stream_rag_pipeline
 from app.telemetry import setup_telemetry, instrument_fastapi
 from app.temporal_workflows import IngestParams, IngestWorkflow, QueryParams, QueryWorkflow
 
@@ -106,6 +106,7 @@ class QueryResponse(BaseModel):
     answer: str
     cached: bool
     sources: list[dict]
+    images: list[dict] = Field(default_factory=list)
     context: str
     flow: dict[str, dict]
     llm_skipped: bool = False
@@ -152,6 +153,31 @@ def document_images(document_id: str) -> dict:
         raise HTTPException(status_code=404, detail="document_id not found")
     images = db.fetch_images_by_document(doc_uuid)
     return {"document_id": document_id, "images": images}
+
+
+@app.get("/images/{image_id}")
+def image_file(image_id: str):
+    if not db.ping():
+        raise HTTPException(status_code=503, detail="Postgres is not reachable")
+    try:
+        img_uuid = UUID(image_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="image_id must be a UUID") from exc
+    image_meta = db.fetch_image(img_uuid)
+    if not image_meta:
+        raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        data, mime_type = get_image_bytes(image_meta["minio_key"])
+        return Response(
+            content=data,
+            media_type=mime_type or image_meta.get("mime_type") or "image/png",
+        )
+    except Exception as exc:
+        log.warning("Could not read image bytes from Garage: %s", exc)
+        try:
+            return RedirectResponse(url=get_image_url(image_meta["minio_key"]))
+        except Exception:
+            raise HTTPException(status_code=502, detail=f"Image storage unavailable: {exc}")
 
 
 @app.post("/ingest")
@@ -219,6 +245,7 @@ async def query(body: QueryRequest) -> QueryResponse:
             "answer": result["answer"],
             "cached": result["cached"],
             "sources": result["sources"],
+            "images": result.get("images", []),
             "context": result["context"],
             "flow": result["flow"],
             "llm_skipped": result["llm_skipped"],
@@ -230,3 +257,16 @@ async def query(body: QueryRequest) -> QueryResponse:
         packed = run_rag_pipeline(body.question, resolved_doc_id)
 
     return QueryResponse(**packed)
+
+
+@app.post("/query/stream")
+def query_stream(body: QueryRequest):
+    if not db.ping():
+        raise HTTPException(status_code=503, detail="Postgres is not reachable")
+    resolved_doc_id = _resolved_document_id(body.document_id)
+
+    def event_generator():
+        for event in stream_rag_pipeline(body.question, resolved_doc_id):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

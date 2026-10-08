@@ -554,6 +554,30 @@ def fetch_images_by_node(node_id: UUID) -> list[dict[str, Any]]:
     ]
 
 
+def fetch_image(image_id: UUID) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, document_id, node_id, minio_key, page, caption, mime_type, created_at
+            FROM images
+            WHERE id = %s
+            """,
+            (image_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": str(row["id"]),
+        "document_id": str(row["document_id"]),
+        "node_id": str(row["node_id"]) if row["node_id"] else None,
+        "minio_key": row["minio_key"],
+        "page": row["page"],
+        "caption": row["caption"],
+        "mime_type": row["mime_type"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
 def vector_search(query_embedding: list[float], limit: int = 20, document_id: UUID | None = None) -> list[dict[str, Any]]:
     sql = """
     SELECT id, document_id, 1 - (embedding <=> %s::vector) as similarity

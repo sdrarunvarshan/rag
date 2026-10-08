@@ -178,6 +178,7 @@ class QueryWorkflow:
             "llm_skipped": generation["llm_skipped"],
             "cached": retrieval.get("cached", False),
             "sources": sources_from_retrieval(retrieval),
+            "images": retrieval.get("images", []),
             "context": retrieval.get("context", ""),
             "flow": flow,
             "query_plan": retrieval.get("query_plan", {}),

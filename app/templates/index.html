@@ -110,6 +110,44 @@
       line-height: 1.45;
       white-space: pre-wrap;
     }
+    .image-gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      gap: 0.75rem;
+      margin-top: 0.6rem;
+    }
+    .image-card {
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.6rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    .image-card img {
+      width: 100%;
+      height: 140px;
+      object-fit: contain;
+      background: #f8fafc;
+      border-radius: 6px;
+      border: 1px solid #e2e8f0;
+      cursor: pointer;
+    }
+    .image-card .caption {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--ink);
+      line-height: 1.25;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .image-card .meta {
+      font-size: 0.72rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
   </style>
 </head>
 <body>
@@ -167,6 +205,7 @@
       ["rerank", "Reranking"],
       ["hierarchy", "Hierarchical Expansion"],
       ["tables", "Table Retrieval"],
+      ["images", "Associated Images"],
       ["context", "Context Organizer"],
       ["graph", "LangGraph"],
       ["llm", "LangChain + Qwen"],
@@ -182,7 +221,27 @@
       return flow;
     }
 
-    function renderPipeline(flow) {
+    function renderImageCards(images) {
+      if (!images || !images.length) return "";
+      const cards = images.map((img) => {
+        const src = img.url || `/images/${img.id}`;
+        const caption = img.caption || (img.page ? `Page ${img.page}` : "Associated image");
+        const key = img.minio_key || "";
+        const pageText = img.page != null ? `p. ${img.page}` : "";
+        return `
+          <div class="image-card">
+            <a href="${escapeHtml(src)}" target="_blank" rel="noopener">
+              <img src="${escapeHtml(src)}" alt="${escapeHtml(caption)}" loading="lazy" onerror="this.onerror=null; this.alt='[Preview unavailable]';">
+            </a>
+            <div class="caption" title="${escapeHtml(caption)}">${escapeHtml(caption)}</div>
+            <div class="meta">${pageText ? `<span>${escapeHtml(pageText)}</span> • ` : ""}<code>${escapeHtml(key)}</code></div>
+          </div>
+        `;
+      }).join("");
+      return `<div class="image-gallery">${cards}</div>`;
+    }
+
+    function renderPipeline(flow, queryImages) {
       const root = document.getElementById("pipeline");
       const byKey = normalizeFlow(flow);
       root.innerHTML = "";
@@ -194,6 +253,18 @@
         let body = "";
         if (key === "llm" && stage?.data?.answer) {
           body = `<div class="answer">${escapeHtml(stage.data.answer)}</div>`;
+          const relevantImgs = (byKey.images && byKey.images.data && byKey.images.data.images) || queryImages || [];
+          if (relevantImgs && relevantImgs.length > 0) {
+            body += `<div style="margin-top:0.85rem; font-weight:600; font-size:0.85rem; color:var(--muted)">Associated Images:</div>`;
+            body += renderImageCards(relevantImgs);
+          }
+        } else if (key === "images") {
+          const imgs = stage?.data?.images || [];
+          if (imgs.length > 0) {
+            body = renderImageCards(imgs);
+          } else if (stage?.data != null) {
+            body = `<div style="font-size:0.8rem; color:var(--muted); padding:0.4rem 0;">No images associated with the retrieved sections.</div>`;
+          }
         } else if (stage?.data != null) {
           body = `<pre>${escapeHtml(formatData(stage.data))}</pre>`;
         }
@@ -326,19 +397,32 @@
       setStatus("Running hybrid retrieval…");
       try {
         const document_id = document.getElementById("docSelect").value || null;
-        const res = await fetch("/query/stream", {
+        let res = await fetch("/query/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ question, document_id }),
         });
         if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.detail || res.statusText);
+          const fallbackRes = await fetch("/query", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question, document_id }),
+          });
+          if (!fallbackRes.ok) {
+            const data = await fallbackRes.json().catch(() => ({}));
+            throw new Error(data.detail || fallbackRes.statusText);
+          }
+          const data = await fallbackRes.json();
+          setStatus(data.llm_skipped ? "Retrieval complete. LLM skipped." : "Query complete.");
+          renderPipeline(data.flow, data.images || []);
+          return;
         }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = "";
         let answer = "";
+        let retrievedImages = [];
+        let baseFlow = {};
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
@@ -351,18 +435,28 @@
             const evt = JSON.parse(line);
             if (evt.event === "retrieved") {
               setStatus("Retrieved sections. Generating answer…");
+              retrievedImages = evt.images || [];
+              if (retrievedImages.length) {
+                baseFlow.images = {
+                  key: "images",
+                  title: "Associated Images",
+                  summary: `${retrievedImages.length} images associated with retrieved sections`,
+                  data: { images: retrievedImages },
+                };
+              }
             } else if (evt.event === "token") {
               answer += evt.text || "";
               renderPipeline({
+                ...baseFlow,
                 llm: {
                   title: "LangChain + Qwen",
                   summary: "Streaming…",
                   data: { answer, skipped: false },
                 },
-              });
+              }, retrievedImages);
             } else if (evt.event === "done") {
               setStatus(evt.llm_skipped ? "Retrieval complete. LLM skipped." : "Query complete.");
-              renderPipeline(evt.flow);
+              renderPipeline(evt.flow, evt.images || retrievedImages);
             }
           }
         }

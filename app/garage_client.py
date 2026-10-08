@@ -100,6 +100,22 @@ def get_image_url(object_key: str, expires_in_hours: int = 24) -> str:
         raise
 
 
+def get_image_bytes(object_key: str) -> tuple[bytes, str]:
+    client = _get_client()
+    try:
+        response = client.get_object(GARAGE_BUCKET, object_key)
+        try:
+            data = response.read()
+            content_type = response.headers.get("content-type", "image/png")
+            return data, content_type
+        finally:
+            response.close()
+            response.release_conn()
+    except Exception as exc:
+        log.error("Failed to fetch image bytes from Garage: %s", exc)
+        raise
+
+
 def delete_image(object_key: str) -> None:
     client = _get_client()
     try:

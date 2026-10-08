@@ -23,6 +23,7 @@ from app.config import (
 from app.db import (
     fetch_children,
     fetch_document,
+    fetch_images_by_node,
     fetch_node,
     fetch_nodes_by_ids,
     fetch_siblings,
@@ -157,6 +158,58 @@ def retrieve_tables(
     return tables[:MAX_TABLES]
 
 
+def retrieve_images(
+    hit_nodes: list[Any],
+    expansions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    node_uuids: list[UUID] = []
+    seen_nodes: set[str] = set()
+
+    def add_node(nid: Any) -> None:
+        if nid is None:
+            return
+        if isinstance(nid, (tuple, list)) and nid:
+            nid = nid[0]
+        if isinstance(nid, dict):
+            nid = nid.get("id") or nid.get("hit_node_id") or nid.get("section_id")
+        try:
+            u = UUID(str(nid))
+            if str(u) not in seen_nodes:
+                seen_nodes.add(str(u))
+                node_uuids.append(u)
+        except (ValueError, TypeError):
+            pass
+
+    for hit in hit_nodes:
+        add_node(hit)
+
+    for item in expansions:
+        add_node(item.get("section_id"))
+        add_node(item.get("hit_node_id"))
+        if item.get("parent"):
+            add_node(item["parent"].get("id"))
+        if item.get("hit"):
+            add_node(item["hit"].get("id"))
+        for child in item.get("children") or []:
+            add_node(child.get("id"))
+        for sibling in item.get("siblings") or []:
+            add_node(sibling.get("id"))
+
+    images: list[dict[str, Any]] = []
+    seen_image_ids: set[str] = set()
+    for node_id in node_uuids:
+        for img in fetch_images_by_node(node_id):
+            img_id = str(img["id"])
+            if img_id not in seen_image_ids:
+                seen_image_ids.add(img_id)
+                img_copy = dict(img)
+                if not img_copy.get("url"):
+                    img_copy["url"] = f"/images/{img_id}"
+                images.append(img_copy)
+
+    return images
+
+
 def _block_text(role: str, node: dict[str, Any]) -> str:
     labels = {
         "parent": "Parent section",
@@ -257,6 +310,8 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
         cached = get_json(key)
         if cached and "fused" in cached and "query_plan" in cached:
             cached["cached"] = True
+            if "images" not in cached:
+                cached["images"] = []
             return cached
 
     plan = understand_query(question)
@@ -304,6 +359,7 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
             break
 
     tables = retrieve_tables(reranked, expansions, plan)
+    images = retrieve_images(reranked, expansions)
     packed = organize_context(plan, expansions, tables)
     payload = {
         "cached": False,
@@ -312,6 +368,7 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
         "structured": packed["blocks"],
         "sections": expansions,
         "tables": tables,
+        "images": images,
         "vector_hits": vector_ids,
         "bm25_hits": bm25_ids,
         "fused": [{"id": node_id, "rrf": score} for node_id, score in fused[:30]],
@@ -382,6 +439,7 @@ def build_query_flow(
         siblings.extend(_relation_preview(item.get("siblings") or []))
         children.extend(_relation_preview(item.get("children") or []))
     tables = _relation_preview(result.get("tables") or [])
+    images = result.get("images") or []
     plan = result.get("query_plan") or understand_query(question)
     context_clip = _clip(result.get("context") or "", 5000)
     doc_label = (doc_meta or {}).get("filename") if doc_meta else "All indexed documents"
@@ -465,6 +523,12 @@ def build_query_flow(
             "title": "Table Retrieval",
             "summary": f"{len(tables)} tables packed for grounding",
             "data": {"tables": tables},
+        },
+        {
+            "key": "images",
+            "title": "Associated Images",
+            "summary": f"{len(images)} images associated with retrieved sections",
+            "data": {"images": images},
         },
         {
             "key": "context",

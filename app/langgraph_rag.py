@@ -98,12 +98,14 @@ def pack_response(question: str, document_id: str | None, state: RAGState) -> di
     retrieval = state.get("retrieval") or {}
     answer = state.get("answer") or ""
     llm_skipped = bool(state.get("llm_skipped"))
+    images = retrieval.get("images") or []
     flow = build_query_flow(question, document_id, retrieval, answer, llm_skipped)
     flow = attach_graph_stage(flow, llm_skipped)
     return {
         "answer": answer,
         "cached": bool(retrieval.get("cached")),
         "sources": sources_from_retrieval(retrieval),
+        "images": images,
         "context": retrieval.get("context") or "",
         "flow": flow,
         "llm_skipped": llm_skipped,
@@ -125,6 +127,7 @@ def stream_rag_pipeline(question: str, document_id: str | None = None):
         "cached": bool(retrieval.get("cached")),
         "query_plan": retrieval.get("query_plan") or {},
         "sources": sources_from_retrieval(retrieval),
+        "images": retrieval.get("images") or [],
         "structured": retrieval.get("structured") or [],
         "context": retrieval.get("context") or "",
     }

@@ -67,6 +67,8 @@ Parent  Sibling  Children              app/retrieve.py (expand_hit)
        ↓
 Table Retrieval                        app/retrieve.py (retrieve_tables)
        ↓
+Associated Image Retrieval             app/retrieve.py (retrieve_images)
+       ↓
 Context Organizer                      app/retrieve.py (organize_context)
        ↓
 Structured Context                    labeled blocks within char budget
@@ -75,7 +77,7 @@ LangGraph retrieve → generate          app/langgraph_rag.py
        ↓
 LangChain + Qwen                       app/llm.py (Hugging Face router, HF_TOKEN)
        ↓
-Grounded Answer
+Answer + Relevant Images
 ```
 
 ### MCP Interface
@@ -110,11 +112,12 @@ LangGraph → Retrieval → Qwen
 | Reranker | Re-scores fused candidates with embedding similarity | `app/retrieve.py` |
 | Hierarchical Expansion | Walks hit → parent section; adds siblings and children per plan | `app/retrieve.py` |
 | Table Retrieval | Pulls table nodes from hits and expanded sections | `app/retrieve.py` |
+| Associated Images | Pulls images linked to top hits and expanded sections | `app/retrieve.py` |
 | Context Organizer | Orders blocks (parent / sibling / child / table) into structured context | `app/retrieve.py` |
 | LangGraph | Orchestrates retrieve → generate | `app/langgraph_rag.py` |
 | LangChain + Qwen | Grounded generation from structured context only | `app/llm.py` |
 
-The web UI and API return a `flow` object with one entry per stage so you can inspect hits, fusion scores, expansions, and the final context.
+The web UI and API return a `flow` object with one entry per stage so you can inspect hits, fusion scores, expansions, associated images, and the final context.
 
 ---
 
@@ -126,6 +129,7 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 - **PostgreSQL as source of truth** for document trees and image metadata
 - **Hybrid search** — dense (pgvector + sentence-transformers) + lexical (BM25), fused with RRF
 - **Hierarchical expansion** — parent section, siblings, children, and dedicated table retrieval
+- **Associated image retrieval** — automatically resolves and returns images linked to top hits and expanded sections alongside the answer
 - **Context organizer** — packs labeled blocks under a character budget
 - **Query flow payload** — every pipeline stage is visible in the API response
 - **Optional `document_id` filter**
@@ -482,8 +486,10 @@ Without Temporal, the API falls back to direct execution. All functionality rema
 | `GET` | `/health` | Postgres, Valkey, and Garage ping |
 | `GET` | `/documents` | Indexed documents |
 | `GET` | `/documents/{document_id}/images` | Get images for a document |
+| `GET` | `/images/{image_id}` | Serve raw image file or redirect to storage |
 | `POST` | `/ingest` | Multipart PDF (`file`) |
-| `POST` | `/query` | Question + optional `document_id` |
+| `POST` | `/query` | Question + optional `document_id` (complete response) |
+| `POST` | `/query/stream` | Question + optional `document_id` (SSE stream: retrieved → tokens → done) |
 
 ### Ingest
 
@@ -516,9 +522,10 @@ curl -X POST http://127.0.0.1:8000/query \
 | `answer` | Grounded LLM output (or a skip/error message) |
 | `query_plan` | Query type, scope, concepts, and expansion flags |
 | `sources` | Expanded sections (parent / siblings / children) used as context |
+| `images` | Images associated with retrieved sections (`id`, `minio_key`, `caption`, `page`, `url`) |
 | `structured` | Ordered context blocks with role labels (`parent`, `sibling`, `child`, `table`, `hit`) |
 | `context` | Structured text sent to Qwen |
-| `flow` | Stage-by-stage pipeline trace (`understand` → `vector` → `bm25` → `hybrid` → `rerank` → `hierarchy` → `tables` → `context` → `llm`) |
+| `flow` | Stage-by-stage pipeline trace (`understand` → `vector` → `bm25` → `hybrid` → `rerank` → `hierarchy` → `tables` → `images` → `context` → `llm`) |
 | `llm_skipped` | `true` if generation was skipped or failed |
 
 The model is instructed to answer **only from retrieved sections**. If the PDF never defines a term, the answer will say the context is insufficient instead of inventing a definition.
