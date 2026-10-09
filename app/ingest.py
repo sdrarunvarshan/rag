@@ -191,7 +191,7 @@ def _document_converter():
         from docling.document_converter import DocumentConverter, PdfFormatOption
 
         options = PdfPipelineOptions()
-        options.do_ocr = False
+        options.do_ocr = True
         options.generate_picture_images = True
         _converter = DocumentConverter(
             format_options={
