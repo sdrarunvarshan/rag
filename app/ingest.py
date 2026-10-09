@@ -306,7 +306,7 @@ def parse_pdf(path: Path) -> tuple[list[ParsedNode], list[ParsedImage]]:
     return nodes, images
 
 
-def ingest_pdf(path: Path, filename: str | None = None) -> dict[str, Any]:
+def ingest_pdf(path: Path, user_id: str, filename: str | None = None) -> dict[str, Any]:
     pdf_path = Path(path)
     if not pdf_path.exists():
         raise FileNotFoundError(str(pdf_path))
@@ -316,7 +316,8 @@ def ingest_pdf(path: Path, filename: str | None = None) -> dict[str, Any]:
     if images:
         ensure_bucket()
     document_id = uuid4()
-    insert_document(document_id, display_name)
+    user_uuid = UUID(user_id)
+    insert_document(document_id, user_uuid, display_name)
     insert_nodes(document_id, [node.as_row() for node in parsed])
 
     images_stored = 0

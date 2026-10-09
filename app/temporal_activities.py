@@ -45,11 +45,12 @@ async def parse_pdf_activity(pdf_path: str, filename: str) -> dict[str, Any]:
 
 
 @activity.defn
-async def insert_document_activity(document_id: str, filename: str) -> None:
+async def insert_document_activity(document_id: str, user_id: str, filename: str) -> None:
     """Insert document metadata into PostgreSQL."""
     log.info(f"Activity: Inserting document {document_id}")
     doc_uuid = UUID(document_id)
-    insert_document(doc_uuid, filename)
+    user_uuid = UUID(user_id)
+    insert_document(doc_uuid, user_uuid, filename)
 
 
 @activity.defn

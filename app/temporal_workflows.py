@@ -77,6 +77,7 @@ def attach_graph_stage(flow: dict[str, dict], llm_skipped: bool) -> dict[str, di
 class IngestParams:
     pdf_path: str
     filename: str
+    user_id: str
 
 
 @dataclass
@@ -105,6 +106,7 @@ class IngestWorkflow:
         await workflow.execute_activity(
             insert_document_activity,
             document_id,
+            params.user_id,
             params.filename,
             start_to_close_timeout=30,
         )

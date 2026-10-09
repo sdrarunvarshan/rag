@@ -32,6 +32,8 @@ from app.config import (
     TEMPORAL_TASK_QUEUE,
     UPLOAD_DIR,
     ensure_data_dirs,
+    MAX_UPLOAD_SIZE_BYTES,
+    MAX_UPLOAD_SIZE_MB,
 )
 from app.garage_client import (
     delete_document_images,
@@ -214,7 +216,7 @@ def health() -> dict:
 def documents(current_user: dict = Depends(get_current_user)) -> dict:
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
-    items = db.list_documents()
+    items = db.list_documents(UUID(current_user["id"]))
     return {"documents": items}
 
 
@@ -233,10 +235,11 @@ def delete_document_endpoint(
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     try:
         doc_uuid = UUID(document_id)
+        user_uuid = UUID(current_user["id"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
-    if not db.document_exists(doc_uuid):
-        raise HTTPException(status_code=404, detail="document_id not found")
+    if not db.document_exists(doc_uuid, user_uuid):
+        raise HTTPException(status_code=404, detail="document_id not found or access denied")
 
     # 1. Purge Garage object storage
     try:
@@ -246,7 +249,7 @@ def delete_document_endpoint(
         log.warning("Could not delete images from Garage (Garage may be down): %s", exc)
 
     # 2. Delete from PostgreSQL (cascades to nodes & images)
-    deleted = db.delete_document(doc_uuid)
+    deleted = db.delete_document(doc_uuid, user_uuid)
     if not deleted:
         raise HTTPException(status_code=500, detail="Failed to delete document from database")
 
@@ -282,8 +285,11 @@ def document_images(
 
 
 @app.get("/images/{image_id}")
-def image_file(image_id: str):
-    """Serve image bytes from Garage storage. Open for direct browser rendering."""
+def image_file(
+    image_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Serve image bytes from Garage storage. Protected by JWT."""
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     try:
@@ -314,12 +320,34 @@ async def ingest(
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Upload a PDF file")
+    
+    if file.size and file.size > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413, 
+            detail=f"File exceeds maximum allowed size of {MAX_UPLOAD_SIZE_MB}MB"
+        )
+        
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     ensure_data_dirs()
     suffix = Path(file.filename).suffix
     with tempfile.NamedTemporaryFile(dir=UPLOAD_DIR, suffix=suffix, delete=False) as handle:
         payload = await file.read()
+        
+        # Check actual file size after reading (in case file.size was None)
+        if len(payload) > MAX_UPLOAD_SIZE_BYTES:
+            raise HTTPException(
+                status_code=413, 
+                detail=f"File exceeds maximum allowed size of {MAX_UPLOAD_SIZE_MB}MB"
+            )
+            
+        # Magic bytes validation for PDF (%PDF-)
+        if not payload.startswith(b"%PDF-"):
+            raise HTTPException(
+                status_code=415,
+                detail="File content does not appear to be a valid PDF document"
+            )
+            
         handle.write(payload)
         temp_path = Path(handle.name)
     try:
@@ -327,13 +355,13 @@ async def ingest(
             log.info("Using Temporal workflow for ingest")
             result = await temporal_client.execute_workflow(
                 IngestWorkflow.run,
-                IngestParams(pdf_path=str(temp_path), filename=file.filename),
+                IngestParams(pdf_path=str(temp_path), filename=file.filename, user_id=current_user["id"]),
                 id=f"ingest-{file.filename}",
                 task_queue=TEMPORAL_TASK_QUEUE,
             )
         else:
             log.info("Using direct execution for ingest (Temporal unavailable)")
-            result = ingest_pdf(temp_path, filename=file.filename)
+            result = ingest_pdf(temp_path, filename=file.filename, user_id=current_user["id"])
     except Exception as exc:
         log.exception("Ingest failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -342,15 +370,16 @@ async def ingest(
     return result
 
 
-def _resolved_document_id(document_id: str | None) -> str | None:
+def _resolved_document_id(document_id: str | None, user_id: str) -> str | None:
     if not document_id:
         return None
     try:
         doc_uuid = UUID(document_id)
+        user_uuid = UUID(user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
-    if not db.document_exists(doc_uuid):
-        raise HTTPException(status_code=404, detail="document_id not found")
+    if not db.document_exists(doc_uuid, user_uuid):
+        raise HTTPException(status_code=404, detail="document_id not found or access denied")
     return document_id
 
 
@@ -361,7 +390,7 @@ async def query(
 ) -> QueryResponse:
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
-    resolved_doc_id = _resolved_document_id(body.document_id)
+    resolved_doc_id = _resolved_document_id(body.document_id, current_user["id"])
 
     if temporal_client:
         log.info("Using Temporal workflow for query")
@@ -403,7 +432,7 @@ def query_stream(
     """
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
-    resolved_doc_id = _resolved_document_id(body.document_id)
+    resolved_doc_id = _resolved_document_id(body.document_id, current_user["id"])
 
     def event_generator():
         try:

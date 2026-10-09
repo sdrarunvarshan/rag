@@ -71,6 +71,10 @@ MAX_TABLES = int(os.getenv("MAX_TABLES", "6"))
 CONTEXT_CHAR_BUDGET = int(os.getenv("CONTEXT_CHAR_BUDGET", "12000"))
 TABLE_RERANK_BONUS = float(os.getenv("TABLE_RERANK_BONUS", "0.15"))
 
+# Upload constraints
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
 
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)

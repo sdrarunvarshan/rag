@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -19,7 +20,7 @@ log = logging.getLogger(__name__)
 _active_url: str | None = None
 _engine = None
 _session_maker = None
-
+_pool: ConnectionPool | None = None
 
 def get_engine():
     global _engine
@@ -34,6 +35,20 @@ def get_session_maker():
     if _session_maker is None:
         _session_maker = sessionmaker(bind=get_engine())
     return _session_maker
+
+
+def get_pool() -> ConnectionPool:
+    global _pool
+    if _pool is None:
+        url = resolve_database_url()
+        _pool = ConnectionPool(
+            url,
+            kwargs={"row_factory": dict_row},
+            min_size=1,
+            max_size=20,
+            timeout=30.0,
+        )
+    return _pool
 
 
 @contextmanager
@@ -104,6 +119,7 @@ SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS documents (
         id UUID PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         filename TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
@@ -195,11 +211,9 @@ def init_schema() -> None:
 
 @contextmanager
 def connect() -> Iterator[psycopg.Connection]:
-    conn = _try_connect(resolve_database_url())
-    try:
+    pool = get_pool()
+    with pool.connection() as conn:
         yield conn
-    finally:
-        conn.close()
 
 
 def ping() -> bool:
@@ -212,11 +226,11 @@ def ping() -> bool:
         return False
 
 
-def insert_document(doc_id: UUID, filename: str) -> None:
+def insert_document(doc_id: UUID, user_id: UUID, filename: str) -> None:
     with connect() as conn:
         conn.execute(
-            "INSERT INTO documents (id, filename) VALUES (%s, %s)",
-            (doc_id, filename),
+            "INSERT INTO documents (id, user_id, filename) VALUES (%s, %s, %s)",
+            (doc_id, user_id, filename),
         )
         conn.commit()
 
@@ -368,22 +382,24 @@ def fetch_subtree(root_id: UUID) -> list[dict[str, Any]]:
     return list(rows)
 
 
-def document_exists(document_id: UUID) -> bool:
+def document_exists(document_id: UUID, user_id: UUID) -> bool:
     with connect() as conn:
         row = conn.execute(
-            "SELECT 1 FROM documents WHERE id = %s", (document_id,)
+            "SELECT 1 FROM documents WHERE id = %s AND user_id = %s", (document_id, user_id)
         ).fetchone()
     return row is not None
 
 
-def list_documents() -> list[dict[str, Any]]:
+def list_documents(user_id: UUID) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
             """
             SELECT id, filename, created_at
             FROM documents
+            WHERE user_id = %s
             ORDER BY created_at DESC
-            """
+            """,
+            (user_id,)
         ).fetchall()
     return [
         {
@@ -395,11 +411,11 @@ def list_documents() -> list[dict[str, Any]]:
     ]
 
 
-def fetch_document(document_id: UUID) -> dict[str, Any] | None:
+def fetch_document(document_id: UUID, user_id: UUID) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, filename, created_at FROM documents WHERE id = %s",
-            (document_id,),
+            "SELECT id, filename, created_at FROM documents WHERE id = %s AND user_id = %s",
+            (document_id, user_id),
         ).fetchone()
     if not row:
         return None
@@ -410,11 +426,11 @@ def fetch_document(document_id: UUID) -> dict[str, Any] | None:
     }
 
 
-def delete_document(document_id: UUID) -> bool:
+def delete_document(document_id: UUID, user_id: UUID) -> bool:
     """Delete document from PostgreSQL. Child nodes and images cascade delete."""
     with connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM documents WHERE id = %s", (document_id,))
+            cur.execute("DELETE FROM documents WHERE id = %s AND user_id = %s", (document_id, user_id))
             deleted = cur.rowcount > 0
         conn.commit()
     return deleted
