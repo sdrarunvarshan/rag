@@ -452,41 +452,44 @@ Restart Uvicorn after changing `.env` (`--reload` does not always reload environ
 
 ---
 
-## Temporal setup (optional)
+## Temporal Setup (Optional)
 
-Temporal provides durable workflow execution with automatic retries and crash recovery. The RAG API automatically uses Temporal if available; otherwise it falls back to direct execution.
+Temporal provides durable workflow execution with automatic retries and crash recovery. The RAG API automatically uses Temporal when available; otherwise, it falls back to direct execution.
 
-### Install Temporal CLI
+### Start the Temporal Server
 
-```bash
-# macOS
-brew install temporal
+**Option 1: Docker (recommended for Windows)**
 
-# Linux
-curl -sSf https://temporal.io/cli.sh | sh
+Ensure Docker Desktop is running, then start the Temporal development server:
 
-# Windows — download from https://temporal.io/cli
+```powershell
+docker run --rm --name temporal-dev -p 7233:7233 temporalio/server:latest
 ```
 
-### Start Temporal server
+Keep this terminal open while using Temporal.
+
+**Option 2: Temporal CLI**
+
+Install the [Temporal CLI](https://temporal.io/setup/install-temporal-cli) for your operating system.
+
+Start the development server:
 
 ```bash
-# Local single-node for development
 temporal server start-dev
-
-# Or Docker
-docker run --rm -p 7233:7233 temporalio/server:latest
 ```
 
-### Start Temporal worker
+### Start the Temporal Worker
 
-In a separate terminal:
+Open a separate terminal in the project directory and run:
 
 ```bash
 uv run python -m app.temporal_worker
 ```
 
 The worker connects to Temporal at `localhost:7233`, listens on `rag-task-queue`, and executes ingest and query workflows.
+
+**Note:** Run only one Temporal server at a time. If Temporal is unavailable, the API can fall back to direct execution.
+
 
 ### Benefits
 
