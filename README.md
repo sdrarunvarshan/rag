@@ -342,24 +342,6 @@ cp .env.example .env
 
 Edit `.env` and set `HF_TOKEN`. **Do not commit `.env`.**
 
-### Database migrations
-
-```bash
-# Apply all pending migrations
-uv run alembic upgrade head
-
-# Create a new migration after changing models.py
-uv run alembic revision --autogenerate -m "Description of changes"
-
-# View migration history
-uv run alembic history
-
-# Rollback to previous migration
-uv run alembic downgrade -1
-```
-
-> **Note:** If you have an existing database with tables created by the old manual schema, the initial migration will safely skip creating existing tables.
-
 ---
 
 ## Environment variables
