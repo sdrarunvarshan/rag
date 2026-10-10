@@ -249,7 +249,7 @@ Wait until PostgreSQL reports that it is accepting connections.
 Set `DATABASE_URL` in your `.env` file:
 
 ```env
-DATABASE_URL=postgresql+psycopg://postgres:1234@localhost:5432/rag
+DATABASE_URL=postgresql://postgres:1234@localhost:5432/rag
 ```
 
 Use `localhost` when running the backend directly on your host machine. If the backend runs inside Docker Compose, use `postgres` as the hostname.
