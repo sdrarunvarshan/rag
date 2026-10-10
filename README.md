@@ -320,15 +320,6 @@ Or set `VALKEY_URL` to the WSL IP from `wsl hostname -I`.
 git clone <your-repo-url>
 cd rag
 ```
-
-### Quick start with Garage (Docker)
-
-```bash
-docker compose up -d garage
-```
-
-Then initialize the Garage layout, create the `rag-app` access key, create the `rag-documents` bucket, allow the key, and update `.env` with your Garage credentials (see above).
-
 ### Application setup
 
 **Windows (PowerShell)**
