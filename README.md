@@ -221,32 +221,71 @@ alembic.ini               Alembic configuration
 - A Hugging Face access token (`HF_TOKEN`) for generation (retrieval still works without it)
 - Temporal Server (optional, for durable workflow execution)
 
-### Database
+### Database (PostgreSQL + pgvector)
 
-```sql
-CREATE DATABASE rag;
-```
+PostgreSQL is the source of truth for document metadata, structured nodes, vector embeddings, and image metadata. The `pgvector` extension supports dense vector retrieval.
 
-Tables are managed by Alembic migrations.
+This project uses Docker Compose to run PostgreSQL.
+
+**1. Start PostgreSQL**
+
+From the project root:
 
 ```bash
-# Apply all pending migrations
+docker compose up -d postgres
+```
+
+**2. Verify the database is ready**
+
+```bash
+docker compose ps
+docker exec postgres pg_isready -U postgres -d rag
+```
+
+Wait until PostgreSQL reports that it is accepting connections.
+
+**3. Configure the database URL**
+
+Set `DATABASE_URL` in your `.env` file:
+
+```env
+DATABASE_URL=postgresql+psycopg://postgres:1234@localhost:5432/rag
+```
+
+Use `localhost` when running the backend directly on your host machine. If the backend runs inside Docker Compose, use `postgres` as the hostname.
+
+**4. Apply database migrations**
+
+After installing project dependencies and configuring `.env`, run:
+
+```bash
 uv run alembic upgrade head
+```
 
-# Create a new migration after model changes
-uv run alembic revision --autogenerate -m "Description of changes"
+Alembic creates and updates the database schema using the migration files in `alembic/versions/`.
 
-# Rollback to previous migration
+**Additional migration commands**
+
+Create a migration after changing SQLAlchemy models:
+
+```bash
+uv run alembic revision --autogenerate -m "Describe schema change"
+```
+
+Roll back one migration:
+
+```bash
 uv run alembic downgrade -1
 ```
+
+**Note:** The Compose configuration initializes the `rag` database automatically on the first start. You do not need to execute `CREATE DATABASE rag;` manually. Database data persists in the `postgres_data` Docker volume.
 
 Default URL (override in `.env`):
 
 ```
-postgresql://postgres:1234@localhost:5432/rag
+postgresql+psycopg://postgres:1234@localhost:5432/rag
 ```
 
-If that user is rejected, the app also tries `postgresql://1234:1234@localhost:5432/rag`.
 
 ### Garage Configuration
 
