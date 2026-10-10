@@ -248,6 +248,18 @@ postgresql://postgres:1234@localhost:5432/rag
 
 If that user is rejected, the app also tries `postgresql://1234:1234@localhost:5432/rag`.
 
+### Garage Configuration
+
+This project uses Garage for S3-compatible object storage.
+
+Before starting Garage, configure "garage/garage.toml" with your own "rpc_secret", "admin_token", and "metrics_token". 
+
+Generate a unique RPC secret on Windows using PowerShell:
+
+uv run python -c "import secrets; print(secrets.token_hex(32))"
+
+
+
 ### Garage (S3-compatible storage)
 
 Garage stores extracted images from PDFs.
