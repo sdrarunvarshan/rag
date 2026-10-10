@@ -256,8 +256,9 @@ Before starting Garage, configure "garage/garage.toml" with your own "rpc_secret
 
 Generate a unique RPC secret on Windows using PowerShell:
 
+```
 uv run python -c "import secrets; print(secrets.token_hex(32))"
-
+```
 
 
 ### Garage (S3-compatible storage)
