@@ -11,7 +11,7 @@ services:
       - RUST_LOG=info
     volumes:
       - garage_data:/data
-      - ./garage-config.toml:/etc/garage.toml:ro
+      - ./garage/garage.toml:/etc/garage.toml:ro
     command: /garage server 
     restart: unless-stopped
 

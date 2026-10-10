@@ -268,16 +268,6 @@ GARAGE_REGION=garage
 ```bash
 docker compose up -d garage
 ```
-«Docker configuration note: Make sure "garage/garage.toml" exists as a file before running Docker Compose. It must be mounted as "/etc/garage.toml", not as a directory. In "docker-compose.yml", use:
-
-volumes:
-  - ./garage/garage.toml:/etc/garage.toml:ro
-
-If Docker reports "/etc/garage.toml" as a directory, remove the incorrectly created "garage.toml" directory, restore the file, and recreate the container:
-
-docker compose down
-docker compose up -d garage»
-
 **Initialize Garage:**
 
 ```bash
