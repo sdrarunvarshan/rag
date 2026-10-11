@@ -24,9 +24,19 @@ _pool: ConnectionPool | None = None
 
 def get_engine():
     global _engine
+
     if _engine is None:
         url = resolve_database_url()
+
+        if url.startswith("postgresql://"):
+            url = url.replace(
+                "postgresql://",
+                "postgresql+psycopg://",
+                1,
+            )
+
         _engine = create_engine(url)
+
     return _engine
 
 
