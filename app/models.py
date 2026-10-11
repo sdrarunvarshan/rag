@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -69,6 +69,7 @@ class Node(Base):
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     path: Mapped[str | None] = mapped_column(String, nullable=True)
+    embedding = Column(Vector(384), nullable=True)
     search_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     # embedding column is added via migration (pgvector type)
     # Not included in model to avoid type issues
