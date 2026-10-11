@@ -7,7 +7,7 @@ Create Date: 2026-10-11 23:18:38.526354
 """
 from alembic import op
 import sqlalchemy as sa
-
+from pgvector.sqlalchemy import Vector
 
 # revision identifiers, used by Alembic.
 revision = '5036da589f1e'
@@ -45,7 +45,7 @@ def upgrade() -> None:
     sa.Column('text', sa.Text(), nullable=True),
     sa.Column('page', sa.Integer(), nullable=True),
     sa.Column('path', sa.String(), nullable=True),
-    sa.Column('embedding', pgvector.sqlalchemy.vector.VECTOR(dim=384), nullable=True),
+    sa.Column('embedding', Vector(384), nullable=True),
     sa.Column('search_text', sa.Text(), nullable=True),
     sa.ForeignKeyConstraint(['document_id'], ['documents.id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['parent_id'], ['nodes.id'], ondelete='CASCADE'),
