@@ -102,18 +102,26 @@ def resolve_database_url() -> str:
         try:
             with _try_connect(url) as conn:
                 conn.execute("SELECT 1")
-            _active_url = url
+            # Convert postgresql+psycopg:// to postgresql:// for psycopg compatibility
+            normalized_url = url
+            if url.startswith("postgresql+psycopg://"):
+                normalized_url = url.replace("postgresql+psycopg://", "postgresql://", 1)
+            _active_url = normalized_url
             if url != DATABASE_URL:
                 log.warning("Primary DATABASE_URL auth failed; using fallback user")
-            return url
+            return normalized_url
         except Exception as exc:
             last_error = exc
             if _auth_failed(exc):
                 log.warning("Postgres auth failed for %s", urlparse(url).username)
                 continue
             if "does not exist" in str(exc).lower():
-                _active_url = url
-                return url
+                # Convert postgresql+psycopg:// to postgresql:// for psycopg compatibility
+                normalized_url = url
+                if url.startswith("postgresql+psycopg://"):
+                    normalized_url = url.replace("postgresql+psycopg://", "postgresql://", 1)
+                _active_url = normalized_url
+                return normalized_url
             raise
     assert last_error is not None
     raise last_error

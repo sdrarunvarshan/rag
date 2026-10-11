@@ -7,11 +7,11 @@ load_dotenv(ROOT / ".env")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+psycopg://postgres:1234@postgres:5432/rag",
+    "postgresql://postgres:1234@postgres:5432/rag",
 )
 DATABASE_URL_FALLBACK = os.getenv(
     "DATABASE_URL_FALLBACK",
-    "postgresql+psycopg://postgres:1234@postgres:5432/rag",
+    "postgresql://postgres:1234@postgres:5432/rag",
 )
 VALKEY_URL = os.getenv("VALKEY_URL", "redis://127.0.0.1:6379/0")
 HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY") or ""
