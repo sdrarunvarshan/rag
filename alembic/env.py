@@ -34,7 +34,17 @@ try:
 except Exception as e:
     print(f"Warning: Could not resolve database URL: {e}, using configured URL")
 
-config.set_main_option("sqlalchemy.url", db_url)
+if db_url.startswith("postgresql://"):
+    db_url = db_url.replace(
+        "postgresql://",
+        "postgresql+psycopg://",
+        1,
+    )
+
+config.set_main_option(
+    "sqlalchemy.url",
+    db_url.replace("%", "%%"),
+)
 
 
 def run_migrations_offline() -> None:
