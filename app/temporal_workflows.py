@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
 from temporalio import workflow
 
 from app.temporal_activities import (
-    get_ingest_stats_activity,
     generate_answer_activity,
+    get_ingest_stats_activity,
     insert_document_activity,
     insert_images_activity,
     insert_nodes_activity,
@@ -20,6 +21,77 @@ from app.temporal_activities import (
 
 log = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Parameter dataclasses (Temporal execute_activity takes at most 1 argument)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ParsePdfParams:
+    pdf_path: str
+    filename: str
+
+
+@dataclass
+class InsertDocumentParams:
+    document_id: str
+    user_id: str
+    filename: str
+
+
+@dataclass
+class InsertNodesParams:
+    document_id: str
+    nodes: list[dict[str, Any]]
+
+
+@dataclass
+class InsertImagesParams:
+    document_id: str
+    images: list[dict[str, Any]]
+
+
+@dataclass
+class GetIngestStatsParams:
+    document_id: str
+    filename: str
+    nodes_parsed: int
+    images_stored: int = 0
+
+
+@dataclass
+class RetrieveParams:
+    question: str
+    document_id: str | None = None
+
+
+@dataclass
+class GenerateAnswerParams:
+    question: str
+    context: str
+    query_plan: dict[str, Any] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Workflow input dataclasses
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IngestParams:
+    pdf_path: str
+    filename: str
+    user_id: str
+
+
+@dataclass
+class QueryParams:
+    question: str
+    document_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def sources_from_retrieval(retrieval: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract sources from retrieval result."""
@@ -73,18 +145,9 @@ def attach_graph_stage(flow: dict[str, dict], llm_skipped: bool) -> dict[str, di
     return stages
 
 
-@dataclass
-class IngestParams:
-    pdf_path: str
-    filename: str
-    user_id: str
-
-
-@dataclass
-class QueryParams:
-    question: str
-    document_id: str | None = None
-
+# ---------------------------------------------------------------------------
+# Workflows
+# ---------------------------------------------------------------------------
 
 @workflow.defn
 class IngestWorkflow:
@@ -97,51 +160,54 @@ class IngestWorkflow:
         # Step 1: Parse PDF
         parsed_data = await workflow.execute_activity(
             parse_pdf_activity,
-            params.pdf_path,
-            params.filename,
-            start_to_close_timeout=300,  # 5 minutes for parsing
+            ParsePdfParams(pdf_path=params.pdf_path, filename=params.filename),
+            start_to_close_timeout=timedelta(seconds=300),  # 5 minutes for parsing
         )
 
         # Step 2: Insert document metadata
         await workflow.execute_activity(
             insert_document_activity,
-            document_id,
-            params.user_id,
-            params.filename,
-            start_to_close_timeout=30,
+            InsertDocumentParams(
+                document_id=document_id,
+                user_id=params.user_id,
+                filename=params.filename,
+            ),
+            start_to_close_timeout=timedelta(seconds=30),
         )
 
         # Step 3: Insert parsed nodes
         await workflow.execute_activity(
             insert_nodes_activity,
-            document_id,
-            parsed_data["nodes"],
-            start_to_close_timeout=60,
+            InsertNodesParams(document_id=document_id, nodes=parsed_data["nodes"]),
+            start_to_close_timeout=timedelta(seconds=60),
         )
 
         # Step 4: Insert parsed images (if any)
         if parsed_data.get("images"):
             await workflow.execute_activity(
                 insert_images_activity,
-                document_id,
-                parsed_data["images"],
-                start_to_close_timeout=120,
+                InsertImagesParams(
+                    document_id=document_id, images=parsed_data["images"]
+                ),
+                start_to_close_timeout=timedelta(seconds=120),
             )
 
         # Step 5: Rebuild indexes
         await workflow.execute_activity(
             rebuild_index_activity,
-            start_to_close_timeout=120,
+            start_to_close_timeout=timedelta(seconds=120),
         )
 
         # Step 6: Get statistics
         stats = await workflow.execute_activity(
             get_ingest_stats_activity,
-            document_id,
-            params.filename,
-            parsed_data["nodes_count"],
-            parsed_data.get("images_count", 0),
-            start_to_close_timeout=30,
+            GetIngestStatsParams(
+                document_id=document_id,
+                filename=params.filename,
+                nodes_parsed=parsed_data["nodes_count"],
+                images_stored=parsed_data.get("images_count", 0),
+            ),
+            start_to_close_timeout=timedelta(seconds=30),
         )
 
         return stats
@@ -156,18 +222,19 @@ class QueryWorkflow:
         # Step 1: Retrieve context
         retrieval = await workflow.execute_activity(
             retrieve_activity,
-            params.question,
-            params.document_id,
-            start_to_close_timeout=60,
+            RetrieveParams(question=params.question, document_id=params.document_id),
+            start_to_close_timeout=timedelta(seconds=60),
         )
 
         # Step 2: Generate answer
         generation = await workflow.execute_activity(
             generate_answer_activity,
-            params.question,
-            retrieval.get("context", ""),
-            retrieval.get("query_plan"),
-            start_to_close_timeout=120,
+            GenerateAnswerParams(
+                question=params.question,
+                context=retrieval.get("context", ""),
+                query_plan=retrieval.get("query_plan"),
+            ),
+            start_to_close_timeout=timedelta(seconds=120),
         )
 
         # Build complete flow with graph stage

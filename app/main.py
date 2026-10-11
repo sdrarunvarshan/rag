@@ -352,11 +352,15 @@ async def ingest(
         temp_path = Path(handle.name)
     try:
         if temporal_client:
+            import time
             log.info("Using Temporal workflow for ingest")
+            # Use a unique workflow ID per upload to avoid conflicts with stale workflows.
+            # The temp file is deleted by parse_pdf_activity after it finishes parsing.
+            workflow_id = f"ingest-{Path(file.filename).stem}-{int(time.time())}"
             result = await temporal_client.execute_workflow(
                 IngestWorkflow.run,
                 IngestParams(pdf_path=str(temp_path), filename=file.filename, user_id=current_user["id"]),
-                id=f"ingest-{file.filename}",
+                id=workflow_id,
                 task_queue=TEMPORAL_TASK_QUEUE,
             )
         else:
@@ -366,7 +370,10 @@ async def ingest(
         log.exception("Ingest failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        temp_path.unlink(missing_ok=True)
+        # When using Temporal the worker deletes the file after parsing.
+        # For direct execution we clean it up here.
+        if not temporal_client:
+            temp_path.unlink(missing_ok=True)
     return result
 
 

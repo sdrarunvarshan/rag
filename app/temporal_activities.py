@@ -17,13 +17,27 @@ from app.retrieve import build_query_flow, retrieve
 log = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Ingest activities
+# ---------------------------------------------------------------------------
+
 @activity.defn
-async def parse_pdf_activity(pdf_path: str, filename: str) -> dict[str, Any]:
+async def parse_pdf_activity(params: dict[str, Any]) -> dict[str, Any]:
     """Parse PDF using Docling and return parsed nodes and images."""
+    pdf_path: str = params["pdf_path"]
+    filename: str = params["filename"]
     log.info(f"Activity: Parsing PDF {pdf_path}")
     path = Path(pdf_path)
-    ensure_bucket()
-    parsed, images = parse_pdf(path)
+    try:
+        ensure_bucket()
+    except Exception as exc:
+        log.warning("Garage bucket unavailable (images may not be stored): %s", exc)
+    try:
+        parsed, images = parse_pdf(path)
+    finally:
+        # Clean up the temp file that was kept alive for this activity
+        path.unlink(missing_ok=True)
+        log.info(f"Activity: Deleted temp file {pdf_path}")
     nodes_data = [node.as_row() for node in parsed]
     images_data = [
         {
@@ -45,8 +59,11 @@ async def parse_pdf_activity(pdf_path: str, filename: str) -> dict[str, Any]:
 
 
 @activity.defn
-async def insert_document_activity(document_id: str, user_id: str, filename: str) -> None:
+async def insert_document_activity(params: dict[str, Any]) -> None:
     """Insert document metadata into PostgreSQL."""
+    document_id: str = params["document_id"]
+    user_id: str = params["user_id"]
+    filename: str = params["filename"]
     log.info(f"Activity: Inserting document {document_id}")
     doc_uuid = UUID(document_id)
     user_uuid = UUID(user_id)
@@ -54,16 +71,20 @@ async def insert_document_activity(document_id: str, user_id: str, filename: str
 
 
 @activity.defn
-async def insert_nodes_activity(document_id: str, nodes: list[dict[str, Any]]) -> None:
+async def insert_nodes_activity(params: dict[str, Any]) -> None:
     """Insert parsed nodes into PostgreSQL."""
+    document_id: str = params["document_id"]
+    nodes: list[dict[str, Any]] = params["nodes"]
     log.info(f"Activity: Inserting {len(nodes)} nodes for document {document_id}")
     doc_uuid = UUID(document_id)
     insert_nodes(doc_uuid, nodes)
 
 
 @activity.defn
-async def insert_images_activity(document_id: str, images: list[dict[str, Any]]) -> None:
+async def insert_images_activity(params: dict[str, Any]) -> None:
     """Insert parsed images into PostgreSQL and MinIO."""
+    document_id: str = params["document_id"]
+    images: list[dict[str, Any]] = params["images"]
     log.info(f"Activity: Inserting {len(images)} images for document {document_id}")
     doc_uuid = UUID(document_id)
     for img_data in images:
@@ -90,10 +111,12 @@ async def rebuild_index_activity() -> None:
 
 
 @activity.defn
-async def get_ingest_stats_activity(
-    document_id: str, filename: str, nodes_parsed: int, images_stored: int = 0
-) -> dict[str, Any]:
+async def get_ingest_stats_activity(params: dict[str, Any]) -> dict[str, Any]:
     """Get document statistics and tree preview."""
+    document_id: str = params["document_id"]
+    filename: str = params["filename"]
+    nodes_parsed: int = params["nodes_parsed"]
+    images_stored: int = params.get("images_stored", 0)
     log.info(f"Activity: Getting stats for document {document_id}")
     doc_uuid = UUID(document_id)
     counts = node_counts(doc_uuid)
@@ -110,21 +133,26 @@ async def get_ingest_stats_activity(
     }
 
 
+# ---------------------------------------------------------------------------
+# Query activities
+# ---------------------------------------------------------------------------
+
 @activity.defn
-async def retrieve_activity(
-    question: str, document_id: str | None
-) -> dict[str, Any]:
+async def retrieve_activity(params: dict[str, Any]) -> dict[str, Any]:
     """Perform retrieval (hybrid search, RRF, rerank, hierarchy, tables, context)."""
+    question: str = params["question"]
+    document_id: str | None = params.get("document_id")
     log.info(f"Activity: Retrieving for question: {question[:50]}...")
     retrieval = retrieve(question, document_id)
     return retrieval
 
 
 @activity.defn
-async def generate_answer_activity(
-    question: str, context: str, query_plan: dict[str, Any] | None
-) -> dict[str, Any]:
+async def generate_answer_activity(params: dict[str, Any]) -> dict[str, Any]:
     """Generate answer using LLM from retrieved context."""
+    question: str = params["question"]
+    context: str = params["context"]
+    query_plan: dict[str, Any] | None = params.get("query_plan")
     log.info(f"Activity: Generating answer for question: {question[:50]}...")
     answer, skipped = generate_answer(question, context, query_plan)
     return {
