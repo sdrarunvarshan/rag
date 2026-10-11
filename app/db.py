@@ -78,6 +78,10 @@ def _auth_failed(exc: BaseException) -> bool:
 
 
 def _try_connect(url: str, autocommit: bool = False) -> psycopg.Connection:
+    # psycopg.connect() doesn't understand SQLAlchemy's +psycopg prefix
+    # Convert postgresql+psycopg:// to postgresql://
+    if url.startswith("postgresql+psycopg://"):
+        url = url.replace("postgresql+psycopg://", "postgresql://", 1)
     return psycopg.connect(
         url,
         row_factory=dict_row,
