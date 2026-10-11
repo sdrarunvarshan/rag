@@ -18,7 +18,14 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-
+  temporal:
+    image: temporalio/temporal:latest
+    container_name: temporal
+    command: server start-dev --ip 0.0.0.0 --ui-port 8080
+    ports:
+      - "7233:7233"
+      - "8080:8080"
+    restart: unless-stopped
   garage:
     image: dxflrs/garage:v2.4.0
     container_name: garage

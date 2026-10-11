@@ -451,47 +451,43 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Restart Uvicorn after changing `.env` (`--reload` does not always reload environment files).
 
 ---
-## Temporal Setup (Optional)
+## Running Locally
 
-Temporal provides durable workflow execution with automatic retries and crash recovery. The RAG API automatically uses Temporal when available; otherwise, it falls back to direct execution.
+1. Start Infrastructure
 
-### Start the Temporal Server
+Start the required infrastructure services, including PostgreSQL, Garage, and Temporal, as configured in "docker-compose.yml".
+---
+docker compose up -d
+---
+Verify that the services are running:
+---
+docker compose ps
+---
+2. Start the Temporal Worker
 
-**Option 1: Docker (recommended for Windows)**
-
-Ensure Docker Desktop is running, then start the Temporal development server:
-
-```powershell
-docker run --rm --name temporal-dev -p 7233:7233 -p 8233:8233 temporalio/temporal:latest server start-dev --ip 0.0.0.0
-```
-
-Keep this terminal open while using Temporal.
-
-- Temporal server: `localhost:7233`
-- Temporal Web UI: http://localhost:8233
-
-**Option 2: Temporal CLI**
-
-Install the [Temporal CLI](https://temporal.io/setup/install-temporal-cli) for your operating system.
-
-Start the development server:
-
-```bash
-temporal server start-dev
-```
-
-### Start the Temporal Worker
-
-Open a separate terminal in the project directory and run:
-
-```bash
+Open a new terminal in the project directory and run:
+---
 uv run python -m app.temporal_worker
-```
+---
+Keep this terminal running while using the application. The worker polls the "rag-task-queue" task queue and executes registered Temporal workflows and activities.
 
-The worker connects to Temporal at `localhost:7233`, listens on `rag-task-queue`, and executes ingest and query workflows.
+3. Start the FastAPI Application
 
-**Note:** Run only one Temporal server at a time. If Temporal is unavailable, the API can fall back to direct execution. The Docker-based setup does not require installing the Temporal CLI on Windows.
+Open another terminal in the project directory and run:
+---
+uv run uvicorn app.main:app --reload
+---
+The API is now available at "http://localhost:8000", and the interactive API documentation is available at "http://localhost:8000/docs".
 
+4. Monitor Temporal Workflows
+
+Open "http://localhost:8080" to inspect workflow executions in the Temporal Web UI.
+
+If ingestion does not complete, check the Temporal workflow status and worker logs for pending activities, connection failures, or errors.
+
+Important: Ensure the Temporal server is running and the API and worker use the same Temporal address and task queue. When running both Python processes directly on the host, the default local Temporal address is "localhost:7233".
+
+---
 
 ### Benefits
 
