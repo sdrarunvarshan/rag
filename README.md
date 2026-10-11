@@ -450,44 +450,66 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 Restart Uvicorn after changing `.env` (`--reload` does not always reload environment files).
 
----
 ## Running Locally
 
-1. Start Infrastructure
+### 1. Start Infrastructure
 
-Start the required infrastructure services, including PostgreSQL, Garage, and Temporal, as configured in "docker-compose.yml".
----
+Start the required infrastructure services, including PostgreSQL, Garage, and Temporal, as configured in `docker-compose.yml`.
+
+```bash
 docker compose up -d
----
+```
+
 Verify that the services are running:
----
+
+```bash
 docker compose ps
----
-2. Start the Temporal Worker
+```
 
-Open a new terminal in the project directory and run:
----
+Ensure all required services are healthy before proceeding.
+
+### 2. Start the Temporal Worker
+
+Open a new terminal in the project directory and start the Temporal worker:
+
+```bash
 uv run python -m app.temporal_worker
----
-Keep this terminal running while using the application. The worker polls the "rag-task-queue" task queue and executes registered Temporal workflows and activities.
+```
 
-3. Start the FastAPI Application
+Keep this terminal running while using the application. The worker polls the `rag-task-queue` task queue and executes registered Temporal workflows and activities.
 
-Open another terminal in the project directory and run:
----
+### 3. Start the FastAPI Application
+
+Open another terminal in the project directory and start the API server:
+
+```bash
 uv run uvicorn app.main:app --reload
----
-The API is now available at "http://localhost:8000", and the interactive API documentation is available at "http://localhost:8000/docs".
+```
 
-4. Monitor Temporal Workflows
+Once the server starts, access the application at:
 
-Open "http://localhost:8080" to inspect workflow executions in the Temporal Web UI.
+- **API:** http://localhost:8000
+- **Interactive API documentation:** http://localhost:8000/docs
+- **Temporal Web UI:** http://localhost:8080
 
-If ingestion does not complete, check the Temporal workflow status and worker logs for pending activities, connection failures, or errors.
+### 4. Monitor Temporal Workflows
 
-Important: Ensure the Temporal server is running and the API and worker use the same Temporal address and task queue. When running both Python processes directly on the host, the default local Temporal address is "localhost:7233".
+Open the [Temporal Web UI](http://localhost:8080) to inspect workflow executions, execution status, and activity progress.
 
----
+If document ingestion does not complete, check the Temporal workflow status and the worker logs for pending activities, connection failures, or execution errors.
+
+### Important Notes
+
+- Keep the infrastructure services, Temporal worker, and FastAPI server running while using the application.
+- Ensure the API and worker use the same Temporal server address and task queue.
+- When both Python processes run directly on the host, the default Temporal address is `localhost:7233`.
+- If a service fails to start, inspect its logs using:
+
+  ```bash
+  docker compose logs -f <service_name>
+  ```
+
+- If Temporal workflows remain pending, verify that the worker is connected to the Temporal server and polling `rag-task-queue`.
 
 ### Benefits
 
