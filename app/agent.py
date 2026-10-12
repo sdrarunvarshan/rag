@@ -236,9 +236,10 @@ async def ask(question: str) -> str:
                     # Capture the RAG answer only if the tool
                     # returned successfully.
                     if (
-                        tool_name == "query_document"
+                        len(message.tool_calls) == 1
+                        and tool_name == "query_document"
                         and not getattr(result, "is_error", False)
-                    ):
+):
                         direct_rag_answer = extract_rag_answer(
                             result_text
                         )
