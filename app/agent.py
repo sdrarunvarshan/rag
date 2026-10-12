@@ -63,7 +63,6 @@ Rules:
 """
 
 
-
 def serialize_result(result: Any) -> str:
     """Extract and serialize an MCP tool result safely."""
 
@@ -239,7 +238,7 @@ async def ask(question: str) -> str:
                         len(message.tool_calls) == 1
                         and tool_name == "query_document"
                         and not getattr(result, "is_error", False)
-):
+                    ):
                         direct_rag_answer = extract_rag_answer(
                             result_text
                         )
@@ -295,4 +294,3 @@ if __name__ == "__main__":
 
         except Exception as exc:
             print(f"\nAgent failed: {exc}")
-
