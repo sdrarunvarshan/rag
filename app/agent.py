@@ -63,13 +63,46 @@ Rules:
 """
 
 
-def serialize_result(result: Any) -> str:
-    """Serialize an MCP result safely into JSON."""
 
-    if hasattr(result, "model_dump"):
-        data = result.model_dump(mode="json")
-    else:
-        data = result
+def serialize_result(result: Any) -> str:
+    """Extract and serialize an MCP tool result safely."""
+
+    if getattr(result, "is_error", False):
+        raise RuntimeError("MCP tool returned an error.")
+
+    data = None
+
+    # FastMCP CallToolResult may expose structured content.
+    if hasattr(result, "structured_content"):
+        data = result.structured_content
+
+    # Handle dictionary-based results too.
+    if data is None and isinstance(result, dict):
+        data = (
+            result.get("structuredContent")
+            or result.get("structured_content")
+        )
+
+    # Fall back to the complete result.
+    if data is None:
+        if hasattr(result, "model_dump"):
+            data = result.model_dump(mode="json")
+        else:
+            data = result
+
+    # If only text content is available, extract it.
+    if isinstance(data, dict) and isinstance(data.get("content"), list):
+        for item in data["content"]:
+            if isinstance(item, dict) and item.get("text"):
+                text = item["text"]
+                try:
+                    return json.dumps(
+                        json.loads(text),
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                except json.JSONDecodeError:
+                    return text
 
     return json.dumps(
         data,
@@ -79,12 +112,7 @@ def serialize_result(result: Any) -> str:
 
 
 def extract_rag_answer(result_text: str) -> str:
-    """
-    Extract the answer from query_document's result.
-
-    If the result does not contain an answer field, preserve
-    the complete result instead of discarding information.
-    """
+    """Return the RAG answer while preserving other results."""
 
     try:
         result = json.loads(result_text)
@@ -96,6 +124,16 @@ def extract_rag_answer(result_text: str) -> str:
 
         if isinstance(answer, str) and answer.strip():
             return answer
+
+        # Handle a nested result if the server wraps its payload.
+        for key in ("structuredContent", "structured_content"):
+            nested = result.get(key)
+
+            if isinstance(nested, dict):
+                answer = nested.get("answer")
+
+                if isinstance(answer, str) and answer.strip():
+                    return answer
 
     return json.dumps(
         result,
