@@ -9,6 +9,7 @@ from uuid import uuid4
 from temporalio import workflow
 
 from app.temporal_activities import (
+    cleanup_garage_activity,
     generate_answer_activity,
     get_ingest_stats_activity,
     insert_document_activity,
@@ -28,8 +29,9 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class ParsePdfParams:
-    pdf_path: str
+    garage_key: str  # Durable object storage key instead of local path
     filename: str
+    document_id: str  # Stable ID for idempotency
 
 
 @dataclass
@@ -48,7 +50,8 @@ class InsertNodesParams:
 @dataclass
 class InsertImagesParams:
     document_id: str
-    images: list[dict[str, Any]]
+    image_keys: list[str]  # List of Garage object keys instead of hex-encoded bytes
+    image_metadata: list[dict[str, Any]]  # Metadata separate from binary data
 
 
 @dataclass
@@ -63,6 +66,7 @@ class GetIngestStatsParams:
 class RetrieveParams:
     question: str
     document_id: str | None = None
+    user_id: str | None = None
 
 
 @dataclass
@@ -72,21 +76,29 @@ class GenerateAnswerParams:
     query_plan: dict[str, Any] | None = None
 
 
+@dataclass
+class CleanupIngestParams:
+    document_id: str
+    garage_keys: list[str]  # Keys to clean up on failure
+
+
 # ---------------------------------------------------------------------------
 # Workflow input dataclasses
 # ---------------------------------------------------------------------------
 
 @dataclass
 class IngestParams:
-    pdf_path: str
+    garage_key: str  # Durable object storage key
     filename: str
     user_id: str
+    document_id: str  # Stable ID for idempotency
 
 
 @dataclass
 class QueryParams:
     question: str
     document_id: str | None = None
+    user_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -155,62 +167,92 @@ class IngestWorkflow:
 
     @workflow.run
     async def run(self, params: IngestParams) -> dict[str, Any]:
-        document_id = str(uuid4())
+        document_id = params.document_id  # Use stable ID from input
 
-        # Step 1: Parse PDF
-        parsed_data = await workflow.execute_activity(
-            parse_pdf_activity,
-            ParsePdfParams(pdf_path=params.pdf_path, filename=params.filename),
-            start_to_close_timeout=timedelta(seconds=300),  # 5 minutes for parsing
-        )
-
-        # Step 2: Insert document metadata
-        await workflow.execute_activity(
-            insert_document_activity,
-            InsertDocumentParams(
-                document_id=document_id,
-                user_id=params.user_id,
-                filename=params.filename,
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-        )
-
-        # Step 3: Insert parsed nodes
-        await workflow.execute_activity(
-            insert_nodes_activity,
-            InsertNodesParams(document_id=document_id, nodes=parsed_data["nodes"]),
-            start_to_close_timeout=timedelta(seconds=60),
-        )
-
-        # Step 4: Insert parsed images (if any)
-        if parsed_data.get("images"):
-            await workflow.execute_activity(
-                insert_images_activity,
-                InsertImagesParams(
-                    document_id=document_id, images=parsed_data["images"]
+        try:
+            # Step 1: Parse PDF from durable storage
+            parsed_data = await workflow.execute_activity(
+                parse_pdf_activity,
+                ParsePdfParams(
+                    garage_key=params.garage_key,
+                    filename=params.filename,
+                    document_id=document_id,
                 ),
+                start_to_close_timeout=timedelta(seconds=300),  # 5 minutes for parsing
+            )
+
+            # Step 2: Insert document metadata (idempotent)
+            await workflow.execute_activity(
+                insert_document_activity,
+                InsertDocumentParams(
+                    document_id=document_id,
+                    user_id=params.user_id,
+                    filename=params.filename,
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+
+            # Step 3: Insert parsed nodes (idempotent)
+            await workflow.execute_activity(
+                insert_nodes_activity,
+                InsertNodesParams(document_id=document_id, nodes=parsed_data["nodes"]),
+                start_to_close_timeout=timedelta(seconds=60),
+            )
+
+            # Step 4: Insert parsed images (if any) - using object keys instead of bytes
+            if parsed_data.get("image_keys"):
+                await workflow.execute_activity(
+                    insert_images_activity,
+                    InsertImagesParams(
+                        document_id=document_id,
+                        image_keys=parsed_data["image_keys"],
+                        image_metadata=parsed_data["image_metadata"],
+                    ),
+                    start_to_close_timeout=timedelta(seconds=120),
+                )
+
+            # Step 5: Rebuild indexes
+            await workflow.execute_activity(
+                rebuild_index_activity,
                 start_to_close_timeout=timedelta(seconds=120),
             )
 
-        # Step 5: Rebuild indexes
-        await workflow.execute_activity(
-            rebuild_index_activity,
-            start_to_close_timeout=timedelta(seconds=120),
-        )
+            # Step 6: Get statistics
+            stats = await workflow.execute_activity(
+                get_ingest_stats_activity,
+                GetIngestStatsParams(
+                    document_id=document_id,
+                    filename=params.filename,
+                    nodes_parsed=parsed_data["nodes_count"],
+                    images_stored=parsed_data.get("images_count", 0),
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+            )
 
-        # Step 6: Get statistics
-        stats = await workflow.execute_activity(
-            get_ingest_stats_activity,
-            GetIngestStatsParams(
-                document_id=document_id,
-                filename=params.filename,
-                nodes_parsed=parsed_data["nodes_count"],
-                images_stored=parsed_data.get("images_count", 0),
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-        )
+            # Step 7: Cleanup: delete original PDF from Garage staging
+            await workflow.execute_activity(
+                cleanup_garage_activity,
+                CleanupIngestParams(
+                    document_id=document_id,
+                    garage_keys=[params.garage_key],
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+            )
 
-        return stats
+            return stats
+
+        except Exception as exc:
+            # Compensation: cleanup on failure
+            log.error(f"Ingest workflow failed for document {document_id}: {exc}")
+            await workflow.execute_activity(
+                cleanup_garage_activity,
+                CleanupIngestParams(
+                    document_id=document_id,
+                    garage_keys=[params.garage_key],
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            raise
 
 
 @workflow.defn

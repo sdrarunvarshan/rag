@@ -28,6 +28,9 @@ def query_document(
     """
     Ask a question about the indexed document corpus.
 
+    WARNING: This MCP tool has no user/tenant context and should not be exposed
+    as a multi-user service. It's intended for trusted single-user local stdio processes.
+
     The RAG pipeline performs:
 
     query understanding
@@ -53,6 +56,7 @@ def query_document(
     return run_rag_pipeline(
         question=question,
         document_id=document_id,
+        user_id=None,  # MCP tools have no user context
     )
 
 
@@ -67,6 +71,9 @@ def retrieve_document_context(
 ) -> dict[str, Any]:
     """
     Retrieve relevant document information without calling the LLM.
+
+    WARNING: This MCP tool has no user/tenant context and should not be exposed
+    as a multi-user service. It's intended for trusted single-user local stdio processes.
 
     Useful for inspecting retrieval quality, including:
 
@@ -90,6 +97,7 @@ def retrieve_document_context(
     return retrieve(
         question=question,
         document_id=document_id,
+        user_id=None,  # MCP tools have no user context
     )
 
 
@@ -103,13 +111,19 @@ def get_document(
     """
     Get metadata for an indexed document.
 
+    WARNING: This MCP tool has no user/tenant context and should not be exposed
+    as a multi-user service. It's intended for trusted single-user local stdio processes.
+
     Args:
         document_id: UUID of the indexed document.
     """
 
     try:
         document_uuid = UUID(document_id)
-        document = fetch_document(document_uuid)
+        # MCP tools have no user context - pass None for user_id
+        # This returns the document if it exists without ownership check
+        # WARNING: Do not expose this endpoint in multi-user deployments
+        document = fetch_document(document_uuid, user_id=None)
 
         if document is None:
             return {
@@ -141,6 +155,9 @@ def get_document_images(
     """
     Get all images extracted from a document.
 
+    WARNING: This MCP tool has no user/tenant context and should not be exposed
+    as a multi-user service. It's intended for trusted single-user local stdio processes.
+
     Args:
         document_id: UUID of the indexed document.
 
@@ -150,7 +167,9 @@ def get_document_images(
 
     try:
         document_uuid = UUID(document_id)
-        images = fetch_images_by_document(document_uuid)
+        # MCP tools have no user context - pass None for user_id
+        # WARNING: Do not expose this endpoint in multi-user deployments
+        images = fetch_images_by_document(document_uuid, user_id=None)
 
         return {
             "document_id": document_id,

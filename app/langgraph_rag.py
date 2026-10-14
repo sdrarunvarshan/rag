@@ -11,13 +11,14 @@ from app.retrieve import build_query_flow, retrieve
 class RAGState(TypedDict, total=False):
     question: str
     document_id: str | None
+    user_id: UUID | None
     retrieval: dict[str, Any]
     answer: str
     llm_skipped: bool
 
 
 def retrieve_node(state: RAGState) -> dict[str, Any]:
-    retrieval = retrieve(state["question"], state.get("document_id"))
+    retrieval = retrieve(state["question"], state.get("document_id"), user_id=state.get("user_id"))
     return {"retrieval": retrieval}
 
 
@@ -94,12 +95,12 @@ def attach_graph_stage(flow: dict[str, dict], llm_skipped: bool) -> dict[str, di
     return stages
 
 
-def pack_response(question: str, document_id: str | None, state: RAGState) -> dict[str, Any]:
+def pack_response(question: str, document_id: str | None, state: RAGState, user_id: UUID | None = None) -> dict[str, Any]:
     retrieval = state.get("retrieval") or {}
     answer = state.get("answer") or ""
     llm_skipped = bool(state.get("llm_skipped"))
     images = retrieval.get("images") or []
-    flow = build_query_flow(question, document_id, retrieval, answer, llm_skipped)
+    flow = build_query_flow(question, document_id, retrieval, answer, llm_skipped, user_id)
     flow = attach_graph_stage(flow, llm_skipped)
     return {
         "answer": answer,
@@ -114,14 +115,14 @@ def pack_response(question: str, document_id: str | None, state: RAGState) -> di
     }
 
 
-def run_rag_pipeline(question: str, document_id: str | None = None) -> dict[str, Any]:
-    state = _GRAPH.invoke({"question": question, "document_id": document_id})
-    return pack_response(question, document_id, state)
+def run_rag_pipeline(question: str, document_id: str | None = None, user_id: UUID | None = None) -> dict[str, Any]:
+    state = _GRAPH.invoke({"question": question, "document_id": document_id, "user_id": user_id})
+    return pack_response(question, document_id, state, user_id)
 
 
-def stream_rag_pipeline(question: str, document_id: str | None = None):
+def stream_rag_pipeline(question: str, document_id: str | None = None, user_id: UUID | None = None):
     """Yield SSE-friendly dicts: retrieved → token* → done."""
-    retrieval = retrieve(question, document_id)
+    retrieval = retrieve(question, document_id, user_id=user_id)
     yield {
         "event": "retrieved",
         "cached": bool(retrieval.get("cached")),
@@ -149,9 +150,11 @@ def stream_rag_pipeline(question: str, document_id: str | None = None):
         {
             "question": question,
             "document_id": document_id,
+            "user_id": user_id,
             "retrieval": retrieval,
             "answer": answer,
             "llm_skipped": skipped,
         },
+        user_id,
     )
     yield {"event": "done", **packed}

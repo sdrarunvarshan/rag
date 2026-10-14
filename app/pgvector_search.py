@@ -91,12 +91,13 @@ class VectorStore:
         self,
         query: str,
         limit: int = 20,
-        document_id: UUID | None = None
+        document_id: UUID | None = None,
+        user_id: UUID | None = None
     ) -> list[dict[str, Any]]:
         """Search for similar documents using vector similarity."""
         try:
             query_embedding = self.embedding_model.encode(query)
-            results = vector_search(query_embedding, limit, document_id)
+            results = vector_search(query_embedding, limit, document_id, user_id)
             return results
         except Exception as exc:
             log.error("Vector search failed: %s", exc)

@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from temporalio import activity
 
 from app.db import insert_document, insert_image, insert_nodes, node_counts, tree_preview
-from app.garage_client import ensure_bucket, upload_image
+from app.garage_client import ensure_bucket, upload_image, delete_document_images, get_image_bytes
 from app.ingest import ingest_flow, parse_pdf
 from app.index import hybrid_index
 from app.llm import generate_answer
@@ -23,37 +23,61 @@ log = logging.getLogger(__name__)
 
 @activity.defn
 async def parse_pdf_activity(params: dict[str, Any]) -> dict[str, Any]:
-    """Parse PDF using Docling and return parsed nodes and images."""
-    pdf_path: str = params["pdf_path"]
+    """Parse PDF using Docling from durable Garage storage and return parsed nodes and images."""
+    garage_key: str = params["garage_key"]
     filename: str = params["filename"]
-    log.info(f"Activity: Parsing PDF {pdf_path}")
-    path = Path(pdf_path)
+    document_id: str = params["document_id"]
+    log.info(f"Activity: Parsing PDF from Garage: {garage_key}")
+    
     try:
         ensure_bucket()
     except Exception as exc:
-        log.warning("Garage bucket unavailable (images may not be stored): %s", exc)
+        log.warning("Garage bucket unavailable: %s", exc)
+        raise
+    
+    # Download PDF from Garage
     try:
-        parsed, images = parse_pdf(path)
+        pdf_bytes, _ = get_image_bytes(garage_key)
+    except Exception as exc:
+        log.error(f"Failed to download PDF from Garage: {exc}")
+        raise
+    
+    # Write to temporary file for Docling
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_file:
+        temp_file.write(pdf_bytes)
+        temp_path = Path(temp_file.name)
+    
+    try:
+        parsed, images = parse_pdf(temp_path)
     finally:
-        # Clean up the temp file that was kept alive for this activity
-        path.unlink(missing_ok=True)
-        log.info(f"Activity: Deleted temp file {pdf_path}")
-    nodes_data = [node.as_row() for node in parsed]
-    images_data = [
-        {
-            "id": str(img.id),
-            "image_data": img.image_data.hex(),
+        # Clean up temp file
+        temp_path.unlink(missing_ok=True)
+    
+    # Store images in Garage and collect keys
+    image_keys = []
+    image_metadata = []
+    doc_uuid = UUID(document_id)
+    
+    for img in images:
+        image_id = img.id or uuid4()
+        # Upload image to Garage with stable key
+        minio_key = upload_image(doc_uuid, img.image_data, img.mime_type, image_id)
+        image_keys.append(minio_key)
+        image_metadata.append({
+            "id": str(image_id),
             "mime_type": img.mime_type,
             "page": img.page,
             "caption": img.caption,
             "node_id": str(img.node_id) if img.node_id else None,
-        }
-        for img in images
-    ]
+        })
+    
+    nodes_data = [node.as_row() for node in parsed]
     return {
         "nodes": nodes_data,
         "nodes_count": len(parsed),
-        "images": images_data,
+        "image_keys": image_keys,
+        "image_metadata": image_metadata,
         "images_count": len(images),
     }
 
@@ -82,24 +106,24 @@ async def insert_nodes_activity(params: dict[str, Any]) -> None:
 
 @activity.defn
 async def insert_images_activity(params: dict[str, Any]) -> None:
-    """Insert parsed images into PostgreSQL and MinIO."""
+    """Insert parsed images into PostgreSQL using pre-uploaded Garage keys."""
     document_id: str = params["document_id"]
-    images: list[dict[str, Any]] = params["images"]
-    log.info(f"Activity: Inserting {len(images)} images for document {document_id}")
+    image_keys: list[str] = params["image_keys"]
+    image_metadata: list[dict[str, Any]] = params["image_metadata"]
+    log.info(f"Activity: Inserting {len(image_keys)} images for document {document_id}")
     doc_uuid = UUID(document_id)
-    for img_data in images:
-        image_id = UUID(img_data["id"])
-        image_bytes = bytes.fromhex(img_data["image_data"])
-        minio_key = upload_image(doc_uuid, image_bytes, img_data["mime_type"], image_id)
-        node_id = UUID(img_data["node_id"]) if img_data["node_id"] else None
+    
+    for minio_key, meta in zip(image_keys, image_metadata):
+        image_id = UUID(meta["id"])
+        node_id = UUID(meta["node_id"]) if meta.get("node_id") else None
         insert_image(
             image_id=image_id,
             document_id=doc_uuid,
             node_id=node_id,
             minio_key=minio_key,
-            page=img_data["page"],
-            caption=img_data["caption"],
-            mime_type=img_data["mime_type"],
+            page=meta["page"],
+            caption=meta["caption"],
+            mime_type=meta["mime_type"],
         )
 
 
@@ -108,6 +132,23 @@ async def rebuild_index_activity() -> None:
     """Rebuild pgvector and BM25 indexes."""
     log.info("Activity: Rebuilding hybrid index")
     hybrid_index.rebuild()
+
+
+@activity.defn
+async def cleanup_garage_activity(params: dict[str, Any]) -> None:
+    """Cleanup Garage objects (staging PDFs or failed ingest artifacts)."""
+    document_id: str = params["document_id"]
+    garage_keys: list[str] = params["garage_keys"]
+    log.info(f"Activity: Cleaning up {len(garage_keys)} Garage objects for document {document_id}")
+    
+    for key in garage_keys:
+        try:
+            from app.garage_client import delete_garage_object
+            delete_garage_object(key)
+            log.info(f"Deleted Garage object: {key}")
+        except Exception as exc:
+            log.warning(f"Failed to delete Garage object {key}: {exc}")
+            # Continue cleanup even if one fails
 
 
 @activity.defn
@@ -142,8 +183,10 @@ async def retrieve_activity(params: dict[str, Any]) -> dict[str, Any]:
     """Perform retrieval (hybrid search, RRF, rerank, hierarchy, tables, context)."""
     question: str = params["question"]
     document_id: str | None = params.get("document_id")
+    user_id_str: str | None = params.get("user_id")
+    user_id = UUID(user_id_str) if user_id_str else None
     log.info(f"Activity: Retrieving for question: {question[:50]}...")
-    retrieval = retrieve(question, document_id)
+    retrieval = retrieve(question, document_id, user_id=user_id)
     return retrieval
 
 

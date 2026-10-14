@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response, Streamin
 from pydantic import BaseModel, Field
 from temporalio.client import Client
 
-from app import cache, db
+from app import db, cache
 from app.auth import (
     TokenResponse,
     UserLogin,
@@ -35,6 +35,11 @@ from app.config import (
     MAX_UPLOAD_SIZE_BYTES,
     MAX_UPLOAD_SIZE_MB,
 )
+from app.errors import (
+    general_exception_handler,
+    http_exception_handler,
+    validation_exception_handler,
+)
 from app.garage_client import (
     delete_document_images,
     ensure_bucket,
@@ -45,6 +50,7 @@ from app.garage_client import (
 from app.index import hybrid_index
 from app.ingest import ingest_pdf
 from app.langgraph_rag import run_rag_pipeline, stream_rag_pipeline
+from app.middleware import add_cors_middleware, stream_upload_to_disk, RequestIDMiddleware
 from app.telemetry import instrument_fastapi, setup_telemetry
 from app.temporal_workflows import IngestParams, IngestWorkflow, QueryParams, QueryWorkflow
 
@@ -71,9 +77,20 @@ async def lifespan(_app: FastAPI):
 
     try:
         db.init_schema()
+        # Check if Alembic migrations are up to date
+        if not db.check_alembic_migration():
+            log.error(
+                "Database schema is not up to date. "
+                "Please run: uv run alembic upgrade head"
+            )
+            raise RuntimeError(
+                "Database schema migration required. "
+                "Run 'uv run alembic upgrade head' before starting the application."
+            )
         log.info("Postgres schema ready")
     except Exception as exc:
-        log.warning("Postgres unavailable at startup: %s", exc)
+        log.error("Postgres schema initialization failed: %s", exc)
+        raise
     if cache.ping():
         log.info("Valkey reachable")
     else:
@@ -112,8 +129,19 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Chunkless Structured RAG", lifespan=lifespan)
 
+# Add request ID middleware (must be first)
+app.add_middleware(RequestIDMiddleware)
+
+# Add CORS middleware
+add_cors_middleware(app)
+
 # Instrument FastAPI with OpenTelemetry
 instrument_fastapi(app)
+
+# Add exception handlers for safe error responses
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, general_exception_handler)
 
 
 class QueryRequest(BaseModel):
@@ -203,11 +231,71 @@ def home():
 
 @app.get("/health")
 def health() -> dict:
+    """
+    Health check endpoint - liveness probe.
+    Returns basic health status without strict dependency checks.
+    """
+    postgres = db.ping()
+    return {
+        "status": "healthy" if postgres else "unhealthy",
+        "postgres": postgres,
+    }
+
+
+@app.get("/ready")
+def ready() -> dict:
+    """
+    Readiness probe - checks required dependencies.
+    Returns unhealthy if required dependencies (PostgreSQL) are unavailable.
+    Optional dependencies (Valkey, Garage) are reported but don't fail readiness.
+    """
     postgres = db.ping()
     valkey = cache.ping()
     garage = garage_ping()
-    status_str = "ok" if postgres and valkey and garage else "degraded"
-    return {"status": status_str, "postgres": postgres, "valkey": valkey, "garage": garage}
+    
+    # PostgreSQL is required
+    if not postgres:
+        return {
+            "status": "not_ready",
+            "postgres": postgres,
+            "valkey": valkey,
+            "garage": garage,
+            "reason": "PostgreSQL is required but unavailable",
+        }
+    
+    # Valkey and Garage are optional for readiness
+    status_str = "ready"
+    issues = []
+    if not valkey:
+        issues.append("Valkey cache unavailable (optional)")
+    if not garage:
+        issues.append("Garage storage unavailable (optional)")
+    
+    return {
+        "status": status_str,
+        "postgres": postgres,
+        "valkey": valkey,
+        "garage": garage,
+        "issues": issues if issues else None,
+    }
+
+
+@app.get("/admin/reconcile-garage")
+def reconcile_garage(current_user: dict = Depends(get_current_user)) -> dict:
+    """
+    Reconcile Garage objects with database metadata to find orphaned objects.
+    
+    This endpoint identifies objects in Garage that no longer have corresponding
+    database entries (orphaned objects) and returns statistics.
+    """
+    from app.garage_client import reconcile_garage_objects
+    
+    try:
+        result = reconcile_garage_objects()
+        return result
+    except Exception as exc:
+        log.error("Garage reconciliation failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Reconciliation failed: {str(exc)}")
 
 
 # --- Document Endpoints (Protected) ---
@@ -230,6 +318,9 @@ def delete_document_endpoint(
     1. Removes all associated images from Garage S3 object store.
     2. Deletes the document row from PostgreSQL (cascades to nodes, images, embeddings).
     3. Rebuilds the hybrid index (BM25 + pgvector).
+    4. Invalidates cached retrieval results for the user.
+    
+    Returns partial-failure status if Garage deletion fails.
     """
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
@@ -241,28 +332,80 @@ def delete_document_endpoint(
     if not db.document_exists(doc_uuid, user_uuid):
         raise HTTPException(status_code=404, detail="document_id not found or access denied")
 
+    garage_deleted = False
+    db_deleted = False
+    index_rebuilt = False
+    cache_invalidated = False
+    errors = []
+
     # 1. Purge Garage object storage
     try:
         delete_document_images(doc_uuid)
+        garage_deleted = True
         log.info("Deleted images from Garage for document %s", doc_uuid)
     except Exception as exc:
-        log.warning("Could not delete images from Garage (Garage may be down): %s", exc)
+        log.error("Failed to delete images from Garage: %s", exc)
+        errors.append(f"Garage deletion failed: {str(exc)}")
 
     # 2. Delete from PostgreSQL (cascades to nodes & images)
-    deleted = db.delete_document(doc_uuid, user_uuid)
-    if not deleted:
-        raise HTTPException(status_code=500, detail="Failed to delete document from database")
+    try:
+        deleted = db.delete_document(doc_uuid, user_uuid)
+        if not deleted:
+            errors.append("Failed to delete document from database")
+        else:
+            db_deleted = True
+            log.info("Deleted document %s from database", doc_uuid)
+    except Exception as exc:
+        log.error("Failed to delete document from database: %s", exc)
+        errors.append(f"Database deletion failed: {str(exc)}")
 
     # 3. Rebuild the BM25 search index to remove deleted document's nodes
-    try:
-        hybrid_index.rebuild_bm25()
-        log.info("BM25 index updated after deleting document %s", doc_uuid)
-    except Exception as exc:
-        log.warning("Failed to refresh hybrid index: %s", exc)
+    if db_deleted:
+        try:
+            hybrid_index.rebuild_bm25()
+            index_rebuilt = True
+            log.info("BM25 index updated after deleting document %s", doc_uuid)
+        except Exception as exc:
+            log.warning("Failed to refresh hybrid index: %s", exc)
+            errors.append(f"Index rebuild failed: {str(exc)}")
 
+    # 4. Invalidate cached retrieval results for the user
+    if db_deleted:
+        try:
+            cache.invalidate_user_cache(str(user_uuid))
+            cache_invalidated = True
+            log.info("Invalidated cache for user %s after deleting document %s", user_uuid, doc_uuid)
+        except Exception as exc:
+            log.warning("Failed to invalidate user cache: %s", exc)
+            errors.append(f"Cache invalidation failed: {str(exc)}")
+
+    # Determine response status
+    if not db_deleted:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Critical failure: {errors[0] if errors else 'Unknown error'}"
+        )
+    
+    if not garage_deleted:
+        return {
+            "status": "partial_failure",
+            "document_id": document_id,
+            "db_deleted": db_deleted,
+            "garage_deleted": garage_deleted,
+            "index_rebuilt": index_rebuilt,
+            "cache_invalidated": cache_invalidated,
+            "errors": errors,
+            "message": "Document deleted from database but Garage objects may remain. Use reconciliation endpoint to clean up.",
+        }
+    
     return {
         "status": "deleted",
         "document_id": document_id,
+        "db_deleted": db_deleted,
+        "garage_deleted": garage_deleted,
+        "index_rebuilt": index_rebuilt,
+        "cache_invalidated": cache_invalidated,
+        "errors": errors if errors else None,
         "message": "Document and all associated PostgreSQL and Garage data removed successfully",
     }
 
@@ -276,11 +419,12 @@ def document_images(
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     try:
         doc_uuid = UUID(document_id)
+        user_uuid = UUID(current_user["id"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
-    if not db.document_exists(doc_uuid):
-        raise HTTPException(status_code=404, detail="document_id not found")
-    images = db.fetch_images_by_document(doc_uuid)
+    if not db.document_exists(doc_uuid, user_uuid):
+        raise HTTPException(status_code=404, detail="document_id not found or access denied")
+    images = db.fetch_images_by_document(doc_uuid, user_uuid)
     return {"document_id": document_id, "images": images}
 
 
@@ -294,11 +438,12 @@ def image_file(
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     try:
         img_uuid = UUID(image_id)
+        user_uuid = UUID(current_user["id"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="image_id must be a UUID") from exc
-    image_meta = db.fetch_image(img_uuid)
+    image_meta = db.fetch_image(img_uuid, user_uuid)
     if not image_meta:
-        raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(status_code=404, detail="Image not found or access denied")
     try:
         data, mime_type = get_image_bytes(image_meta["minio_key"])
         return Response(
@@ -317,63 +462,80 @@ def image_file(
 async def ingest(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
+    request: Request,
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Upload a PDF file")
     
-    if file.size and file.size > MAX_UPLOAD_SIZE_BYTES:
-        raise HTTPException(
-            status_code=413, 
-            detail=f"File exceeds maximum allowed size of {MAX_UPLOAD_SIZE_MB}MB"
-        )
-        
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
-    ensure_data_dirs()
-    suffix = Path(file.filename).suffix
-    with tempfile.NamedTemporaryFile(dir=UPLOAD_DIR, suffix=suffix, delete=False) as handle:
-        payload = await file.read()
-        
-        # Check actual file size after reading (in case file.size was None)
-        if len(payload) > MAX_UPLOAD_SIZE_BYTES:
-            raise HTTPException(
-                status_code=413, 
-                detail=f"File exceeds maximum allowed size of {MAX_UPLOAD_SIZE_MB}MB"
-            )
-            
-        # Magic bytes validation for PDF (%PDF-)
-        if not payload.startswith(b"%PDF-"):
-            raise HTTPException(
-                status_code=415,
-                detail="File content does not appear to be a valid PDF document"
-            )
-            
-        handle.write(payload)
-        temp_path = Path(handle.name)
+    
+    request_id = getattr(request.state, "request_id", "unknown")
+    
+    # Stream upload to disk with size validation
     try:
+        temp_path = await stream_upload_to_disk(file, MAX_UPLOAD_SIZE_BYTES)
+    except HTTPException:
+        # Re-raise HTTP exceptions (size limit, invalid PDF, etc.)
+        raise
+    except Exception as exc:
+        log.exception("Upload streaming failed, request_id=%s", request_id)
+        raise HTTPException(status_code=500, detail=f"Failed to process file upload: {str(exc)}") from exc
+    
+    # Generate stable document ID for idempotency
+    from uuid import uuid4
+    document_id = str(uuid4())
+    
+    try:
+        # Upload PDF to Garage for durable storage
+        from app.garage_client import upload_pdf
+        pdf_bytes = temp_path.read_bytes()
+        garage_key = upload_pdf(pdf_bytes, UUID(document_id), file.filename)
+        
+        # Clean up temp file after upload to Garage
+        temp_path.unlink(missing_ok=True)
+        
         if temporal_client:
-            import time
-            log.info("Using Temporal workflow for ingest")
-            # Use a unique workflow ID per upload to avoid conflicts with stale workflows.
-            # The temp file is deleted by parse_pdf_activity after it finishes parsing.
-            workflow_id = f"ingest-{Path(file.filename).stem}-{int(time.time())}"
+            log.info("Using Temporal workflow for ingest, request_id=%s, document_id=%s", request_id, document_id)
+            # Use UUID-based workflow ID to avoid collisions
+            from uuid import uuid4
+            workflow_id = f"ingest-{uuid4()}"
             result = await temporal_client.execute_workflow(
                 IngestWorkflow.run,
-                IngestParams(pdf_path=str(temp_path), filename=file.filename, user_id=current_user["id"]),
+                IngestParams(
+                    garage_key=garage_key,
+                    filename=file.filename,
+                    user_id=current_user["id"],
+                    document_id=document_id,
+                ),
                 id=workflow_id,
                 task_queue=TEMPORAL_TASK_QUEUE,
             )
         else:
-            log.info("Using direct execution for ingest (Temporal unavailable)")
-            result = ingest_pdf(temp_path, filename=file.filename, user_id=current_user["id"])
+            log.info("Using direct execution for ingest (Temporal unavailable), request_id=%s, document_id=%s", request_id, document_id)
+            # For direct execution, download from Garage and process
+            from app.garage_client import get_image_bytes
+            pdf_bytes, _ = get_image_bytes(garage_key)
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
+                handle.write(pdf_bytes)
+                direct_temp_path = Path(handle.name)
+            try:
+                result = ingest_pdf(direct_temp_path, filename=file.filename, user_id=current_user["id"])
+            finally:
+                direct_temp_path.unlink(missing_ok=True)
+                # Cleanup staging PDF
+                from app.garage_client import delete_garage_object
+                delete_garage_object(garage_key)
     except Exception as exc:
-        log.exception("Ingest failed")
+        log.exception("Ingest failed, request_id=%s, document_id=%s", request_id, document_id)
+        # Cleanup staging PDF on failure
+        try:
+            from app.garage_client import delete_garage_object
+            delete_garage_object(garage_key)
+        except Exception as cleanup_exc:
+            log.warning("Failed to cleanup staging PDF, request_id=%s: %s", request_id, cleanup_exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:
-        # When using Temporal the worker deletes the file after parsing.
-        # For direct execution we clean it up here.
-        if not temporal_client:
-            temp_path.unlink(missing_ok=True)
+    
     return result
 
 
@@ -394,17 +556,23 @@ def _resolved_document_id(document_id: str | None, user_id: str) -> str | None:
 async def query(
     body: QueryRequest,
     current_user: dict = Depends(get_current_user),
+    request: Request,
 ) -> QueryResponse:
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     resolved_doc_id = _resolved_document_id(body.document_id, current_user["id"])
+    user_uuid = UUID(current_user["id"])
+    request_id = getattr(request.state, "request_id", "unknown")
 
     if temporal_client:
-        log.info("Using Temporal workflow for query")
+        log.info("Using Temporal workflow for query, request_id=%s", request_id)
+        from uuid import uuid4
+        # Use UUID instead of hash to avoid collisions with concurrent identical questions
+        workflow_id = f"query-{uuid4()}"
         result = await temporal_client.execute_workflow(
             QueryWorkflow.run,
-            QueryParams(question=body.question, document_id=resolved_doc_id),
-            id=f"query-{hash(body.question)}",
+            QueryParams(question=body.question, document_id=resolved_doc_id, user_id=str(user_uuid)),
+            id=workflow_id,
             task_queue=TEMPORAL_TASK_QUEUE,
         )
         packed = {
@@ -419,8 +587,8 @@ async def query(
             "structured": result["structured"],
         }
     else:
-        log.info("Using direct execution for query (Temporal unavailable)")
-        packed = run_rag_pipeline(body.question, resolved_doc_id)
+        log.info("Using direct execution for query (Temporal unavailable), request_id=%s", request_id)
+        packed = run_rag_pipeline(body.question, resolved_doc_id, user_uuid)
 
     return QueryResponse(**packed)
 
@@ -429,6 +597,7 @@ async def query(
 def query_stream(
     body: QueryRequest,
     current_user: dict = Depends(get_current_user),
+    request: Request,
 ):
     """
     Streaming SSE endpoint for real-time conversational chat response.
@@ -440,14 +609,16 @@ def query_stream(
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     resolved_doc_id = _resolved_document_id(body.document_id, current_user["id"])
+    user_uuid = UUID(current_user["id"])
+    request_id = getattr(request.state, "request_id", "unknown")
 
     def event_generator():
         try:
-            for event in stream_rag_pipeline(body.question, resolved_doc_id):
+            for event in stream_rag_pipeline(body.question, resolved_doc_id, user_uuid):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
-            log.exception("SSE streaming generation error")
-            yield f"data: {json.dumps({'event': 'error', 'detail': str(exc)})}\n\n"
+            log.exception("SSE streaming generation error, request_id=%s", request_id)
+            yield f"data: {json.dumps({'event': 'error', 'detail': 'An error occurred', 'request_id': request_id})}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -456,5 +627,6 @@ def query_stream(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "X-Request-ID": request_id,
         },
     )

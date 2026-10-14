@@ -247,9 +247,114 @@ def _get_extension(mime_type: str) -> str:
         "image/webp": "webp",
         "image/bmp": "bmp",
         "image/tiff": "tiff",
+        "application/pdf": "pdf",
     }
 
     return mime_to_ext.get(
         mime_type.lower(),
         "bin",
     )
+
+
+def upload_pdf(
+    pdf_bytes: bytes,
+    document_id: UUID,
+    filename: str,
+) -> str:
+    """Upload a PDF to Garage staging area for processing."""
+    ensure_bucket()
+    
+    object_key = f"staging/{document_id}/{filename}"
+    
+    try:
+        client = _get_boto3_client()
+        client.put_object(
+            Bucket=GARAGE_BUCKET,
+            Key=object_key,
+            Body=pdf_bytes,
+            ContentType="application/pdf",
+        )
+        log.info("Uploaded PDF to Garage staging: %s", object_key)
+        return object_key
+    except Exception as exc:
+        log.error("Failed to upload PDF to Garage: %s", exc)
+        raise
+
+
+def delete_garage_object(object_key: str) -> None:
+    """Delete a single object from Garage."""
+    try:
+        client = _get_boto3_client()
+        client.delete_object(
+            Bucket=GARAGE_BUCKET,
+            Key=object_key,
+        )
+        log.info("Deleted Garage object: %s", object_key)
+    except Exception as exc:
+        log.warning("Failed to delete Garage object %s: %s", object_key, exc)
+        raise
+
+
+def reconcile_garage_objects() -> dict[str, Any]:
+    """
+    Reconcile Garage objects with database metadata to find orphaned objects.
+    
+    Returns:
+        Dictionary with orphaned objects and statistics.
+    """
+    from app.db import connect
+    
+    try:
+        client = _get_boto3_client()
+        
+        # Get all document IDs from database
+        with connect() as conn:
+            rows = conn.execute("SELECT id FROM documents").fetchall()
+            db_document_ids = {str(row["id"]) for row in rows}
+        
+        # Get all image keys from database
+        with connect() as conn:
+            rows = conn.execute("SELECT minio_key FROM images").fetchall()
+            db_image_keys = {row["minio_key"] for row in rows}
+        
+        # List all objects in Garage
+        paginator = client.get_paginator("list_objects_v2")
+        all_keys = set()
+        
+        for page in paginator.paginate(Bucket=GARAGE_BUCKET):
+            contents = page.get("Contents", [])
+            all_keys.update(obj["Key"] for obj in contents)
+        
+        # Find orphaned objects
+        orphaned_images = []
+        orphaned_documents = []
+        orphaned_staging = []
+        
+        for key in all_keys:
+            if key.startswith("documents/"):
+                # Check if it's an image
+                parts = key.split("/")
+                if len(parts) >= 4 and parts[2] == "images":
+                    if key not in db_image_keys:
+                        orphaned_images.append(key)
+                else:
+                    # Document prefix
+                    doc_id = parts[1]
+                    if doc_id not in db_document_ids:
+                        orphaned_documents.append(key)
+            elif key.startswith("staging/"):
+                orphaned_staging.append(key)
+        
+        return {
+            "total_garage_objects": len(all_keys),
+            "db_document_count": len(db_document_ids),
+            "db_image_count": len(db_image_keys),
+            "orphaned_images": orphaned_images,
+            "orphaned_documents": orphaned_documents,
+            "orphaned_staging": orphaned_staging,
+            "orphaned_count": len(orphaned_images) + len(orphaned_documents) + len(orphaned_staging),
+        }
+        
+    except Exception as exc:
+        log.error("Failed to reconcile Garage objects: %s", exc)
+        raise

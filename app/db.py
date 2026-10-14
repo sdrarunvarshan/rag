@@ -137,56 +137,8 @@ def resolve_database_url() -> str:
     raise last_error
 
 
-SCHEMA_STATEMENTS = (
-    """
-    CREATE TABLE IF NOT EXISTS documents (
-        id UUID PRIMARY KEY,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        filename TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS nodes (
-        id UUID PRIMARY KEY,
-        document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-        parent_id UUID REFERENCES nodes(id) ON DELETE CASCADE,
-        node_type TEXT NOT NULL CHECK (node_type IN ('section', 'subsection', 'table')),
-        heading TEXT,
-        text TEXT,
-        page INTEGER,
-        path TEXT,
-        search_text TEXT
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS images (
-        id UUID PRIMARY KEY,
-        document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-        node_id UUID REFERENCES nodes(id) ON DELETE CASCADE,
-        minio_key TEXT NOT NULL,
-        page INTEGER,
-        caption TEXT,
-        mime_type TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_nodes_document_id ON nodes(document_id)",
-    "CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes(parent_id)",
-    "CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type)",
-    "CREATE INDEX IF NOT EXISTS idx_images_document_id ON images(document_id)",
-    "CREATE INDEX IF NOT EXISTS idx_images_node_id ON images(node_id)",
-    """
-    CREATE TABLE IF NOT EXISTS users (
-        id UUID PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        hashed_password TEXT NOT NULL,
-        full_name TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
-)
+# SCHEMA_STATEMENTS removed - Schema is now managed by Alembic migrations only
+# See alembic/versions/ for migration definitions
 
 
 def _admin_url(url: str) -> str:
@@ -217,18 +169,57 @@ def ensure_database() -> None:
 
 
 def init_schema() -> None:
+    """
+    Initialize database schema.
+    
+    Schema is managed by Alembic migrations only.
+    This function ensures the database exists but does NOT create tables.
+    Run 'alembic upgrade head' to apply migrations before starting the application.
+    """
     ensure_database()
-    # Schema is now managed by Alembic migrations
-    # Run migrations instead of manual schema creation
     log.info("Schema managed by Alembic - run 'alembic upgrade head' to apply migrations")
-    # Keep backward compatibility - try to create schema if it doesn't exist
-    with connect() as conn:
-        for statement in SCHEMA_STATEMENTS:
-            try:
-                conn.execute(statement)
-            except Exception as exc:
-                log.debug("Schema statement failed (might exist): %s", exc)
-        conn.commit()
+    # Removed legacy schema creation - Alembic is the single source of truth
+
+
+def check_alembic_migration() -> bool:
+    """
+    Check if the database is at the expected Alembic migration head.
+    
+    Returns True if migrations are up to date, False otherwise.
+    This is a basic check - for production, use Alembic's API directly.
+    """
+    try:
+        with connect() as conn:
+            # Check if alembic_version table exists
+            row = conn.execute(
+                """
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'alembic_version'
+                )
+                """
+            ).fetchone()
+            
+            if not row or not row["exists"]:
+                log.warning("Alembic version table not found - run 'alembic upgrade head'")
+                return False
+            
+            # Check current version
+            version_row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+            if not version_row:
+                log.warning("No Alembic version found - run 'alembic upgrade head'")
+                return False
+            
+            current_version = version_row["version_num"]
+            log.info("Current Alembic version: %s", current_version)
+            
+            # In production, you would compare this against the expected head revision
+            # For now, we just log the version and return True if the table exists
+            return True
+            
+    except Exception as exc:
+        log.warning("Failed to check Alembic migration status: %s", exc)
+        return False
 
 
 @contextmanager
@@ -283,27 +274,51 @@ def insert_nodes(document_id: UUID, nodes: list[dict[str, Any]]) -> None:
         conn.commit()
 
 
-def fetch_all_index_rows() -> list[dict[str, Any]]:
+def fetch_all_index_rows(user_id: UUID | None = None) -> list[dict[str, Any]]:
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, document_id, search_text
-            FROM nodes
-            WHERE COALESCE(search_text, '') <> ''
-            ORDER BY path NULLS LAST, id
-            """
-        ).fetchall()
+        if user_id:
+            rows = conn.execute(
+                """
+                SELECT n.id, n.document_id, d.user_id, n.search_text
+                FROM nodes n
+                INNER JOIN documents d ON n.document_id = d.id
+                WHERE COALESCE(n.search_text, '') <> '' AND d.user_id = %s
+                ORDER BY n.path NULLS LAST, n.id
+                """,
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT n.id, n.document_id, d.user_id, n.search_text
+                FROM nodes n
+                INNER JOIN documents d ON n.document_id = d.id
+                WHERE COALESCE(n.search_text, '') <> ''
+                ORDER BY n.path NULLS LAST, n.id
+                """
+            ).fetchall()
     return list(rows)
 
 
-def fetch_nodes_by_ids(ids: list[UUID]) -> list[dict[str, Any]]:
+def fetch_nodes_by_ids(ids: list[UUID], user_id: UUID | None = None) -> list[dict[str, Any]]:
     if not ids:
         return []
     with connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM nodes WHERE id = ANY(%s)",
-            (ids,),
-        ).fetchall()
+        if user_id:
+            rows = conn.execute(
+                """
+                SELECT n.*
+                FROM nodes n
+                INNER JOIN documents d ON n.document_id = d.id
+                WHERE n.id = ANY(%s) AND d.user_id = %s
+                """,
+                (ids, user_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM nodes WHERE id = ANY(%s)",
+                (ids,),
+            ).fetchall()
     by_id = {row["id"]: row for row in rows}
     return [by_id[i] for i in ids if i in by_id]
 
@@ -433,12 +448,20 @@ def list_documents(user_id: UUID) -> list[dict[str, Any]]:
     ]
 
 
-def fetch_document(document_id: UUID, user_id: UUID) -> dict[str, Any] | None:
+def fetch_document(document_id: UUID, user_id: UUID | None = None) -> dict[str, Any] | None:
     with connect() as conn:
-        row = conn.execute(
-            "SELECT id, filename, created_at FROM documents WHERE id = %s AND user_id = %s",
-            (document_id, user_id),
-        ).fetchone()
+        if user_id:
+            row = conn.execute(
+                "SELECT id, filename, created_at FROM documents WHERE id = %s AND user_id = %s",
+                (document_id, user_id),
+            ).fetchone()
+        else:
+            # WARNING: No ownership check when user_id is None
+            # This should only be used in trusted single-user contexts (e.g., MCP tools)
+            row = conn.execute(
+                "SELECT id, filename, created_at FROM documents WHERE id = %s",
+                (document_id,),
+            ).fetchone()
     if not row:
         return None
     return {
@@ -559,17 +582,29 @@ def insert_image(
         conn.commit()
 
 
-def fetch_images_by_document(document_id: UUID) -> list[dict[str, Any]]:
+def fetch_images_by_document(document_id: UUID, user_id: UUID | None = None) -> list[dict[str, Any]]:
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, document_id, node_id, minio_key, page, caption, mime_type, created_at
-            FROM images
-            WHERE document_id = %s
-            ORDER BY page, created_at
-            """,
-            (document_id,),
-        ).fetchall()
+        if user_id:
+            rows = conn.execute(
+                """
+                SELECT i.id, i.document_id, i.node_id, i.minio_key, i.page, i.caption, i.mime_type, i.created_at
+                FROM images i
+                INNER JOIN documents d ON i.document_id = d.id
+                WHERE i.document_id = %s AND d.user_id = %s
+                ORDER BY i.page, i.created_at
+                """,
+                (document_id, user_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, document_id, node_id, minio_key, page, caption, mime_type, created_at
+                FROM images
+                WHERE document_id = %s
+                ORDER BY page, created_at
+                """,
+                (document_id,),
+            ).fetchall()
     return [
         {
             "id": str(row["id"]),
@@ -611,16 +646,30 @@ def fetch_images_by_node(node_id: UUID) -> list[dict[str, Any]]:
     ]
 
 
-def fetch_image(image_id: UUID) -> dict[str, Any] | None:
+def fetch_image(image_id: UUID, user_id: UUID | None = None) -> dict[str, Any] | None:
     with connect() as conn:
-        row = conn.execute(
-            """
-            SELECT id, document_id, node_id, minio_key, page, caption, mime_type, created_at
-            FROM images
-            WHERE id = %s
-            """,
-            (image_id,),
-        ).fetchone()
+        if user_id:
+            # Join with documents to enforce ownership check
+            row = conn.execute(
+                """
+                SELECT i.id, i.document_id, i.node_id, i.minio_key, i.page, i.caption, i.mime_type, i.created_at
+                FROM images i
+                INNER JOIN documents d ON i.document_id = d.id
+                WHERE i.id = %s AND d.user_id = %s
+                """,
+                (image_id, user_id),
+            ).fetchone()
+        else:
+            # WARNING: No ownership check when user_id is None
+            # This should only be used in trusted single-user contexts
+            row = conn.execute(
+                """
+                SELECT id, document_id, node_id, minio_key, page, caption, mime_type, created_at
+                FROM images
+                WHERE id = %s
+                """,
+                (image_id,),
+            ).fetchone()
     if not row:
         return None
     return {
@@ -635,17 +684,56 @@ def fetch_image(image_id: UUID) -> dict[str, Any] | None:
     }
 
 
-def vector_search(query_embedding: list[float], limit: int = 20, document_id: UUID | None = None) -> list[dict[str, Any]]:
-    sql = """
-    SELECT id, document_id, 1 - (embedding <=> %s::vector) as similarity
-    FROM nodes
-    WHERE embedding IS NOT NULL
-    """
-    params: list[Any] = [query_embedding]
-    
-    if document_id:
-        sql += " AND document_id = %s"
-        params.append(document_id)
+def image_belongs_to_user(image_id: UUID, user_id: UUID) -> bool:
+    """Check if an image belongs to a user via its parent document."""
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM images i
+            INNER JOIN documents d ON i.document_id = d.id
+            WHERE i.id = %s AND d.user_id = %s
+            """,
+            (image_id, user_id),
+        ).fetchone()
+    return row is not None
+
+
+def vector_search(query_embedding: list[float], limit: int = 20, document_id: UUID | None = None, user_id: UUID | None = None) -> list[dict[str, Any]]:
+    if user_id and document_id:
+        # Both user_id and document_id provided - filter by both
+        sql = """
+        SELECT n.id, n.document_id, 1 - (n.embedding <=> %s::vector) as similarity
+        FROM nodes n
+        INNER JOIN documents d ON n.document_id = d.id
+        WHERE n.embedding IS NOT NULL AND n.document_id = %s AND d.user_id = %s
+        """
+        params: list[Any] = [query_embedding, document_id, user_id]
+    elif user_id:
+        # Only user_id provided - filter by user (all documents owned by user)
+        sql = """
+        SELECT n.id, n.document_id, 1 - (n.embedding <=> %s::vector) as similarity
+        FROM nodes n
+        INNER JOIN documents d ON n.document_id = d.id
+        WHERE n.embedding IS NOT NULL AND d.user_id = %s
+        """
+        params = [query_embedding, user_id]
+    elif document_id:
+        # Only document_id provided - filter by document (no user check)
+        sql = """
+        SELECT id, document_id, 1 - (embedding <=> %s::vector) as similarity
+        FROM nodes
+        WHERE embedding IS NOT NULL AND document_id = %s
+        """
+        params = [query_embedding, document_id]
+    else:
+        # No filtering - search all nodes (WARNING: not tenant-isolated)
+        sql = """
+        SELECT id, document_id, 1 - (embedding <=> %s::vector) as similarity
+        FROM nodes
+        WHERE embedding IS NOT NULL
+        """
+        params = [query_embedding]
     
     sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
     params.extend([query_embedding, limit])
@@ -729,3 +817,13 @@ def get_user_by_id(user_id: UUID | str) -> dict[str, Any] | None:
         "full_name": row["full_name"],
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }
+
+
+def delete_user(user_id: UUID) -> bool:
+    """Delete a user. WARNING: This cascades to all user's documents."""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            deleted = cur.rowcount > 0
+        conn.commit()
+    return deleted

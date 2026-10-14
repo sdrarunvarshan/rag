@@ -1,6 +1,15 @@
 """
-DeepEval pytest tests for RAG system evaluation.
-These tests can be used in CI/CD pipelines to ensure RAG quality.
+DeepEval integration tests for RAG system evaluation.
+
+IMPORTANT: These are integration tests that require:
+- A live Hugging Face endpoint/token for DeepEval
+- External LLM services for evaluation
+- These are NOT deterministic unit tests
+
+These tests should be run separately from unit tests as an optional
+evaluation job in CI. They require external services and secrets.
+
+Run with: pytest tests/test_rag_evaluation.py -v
 """
 
 import pytest

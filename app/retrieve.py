@@ -38,10 +38,10 @@ from app.query_understand import understand_query
 log = logging.getLogger(__name__)
 
 
-def _cache_key(question: str, document_id: str | None) -> str:
-    payload = json.dumps({"q": question, "d": document_id}, sort_keys=True)
+def _cache_key(question: str, document_id: str | None, user_id: UUID | None = None) -> str:
+    payload = json.dumps({"q": question, "d": document_id, "u": str(user_id) if user_id else None}, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return f"rag:flow:v3:{digest}"
+    return f"rag:flow:v4:{digest}"
 
 
 def reciprocal_rank_fusion(rank_lists: list[list[str]], k: int = RRF_K) -> list[tuple[str, float]]:
@@ -304,8 +304,8 @@ def organize_context(
     return {"text": text, "blocks": selected, "chars": len(text)}
 
 
-def retrieve(question: str, document_id: str | None = None, use_cache: bool = True) -> dict[str, Any]:
-    key = _cache_key(question, document_id)
+def retrieve(question: str, document_id: str | None = None, use_cache: bool = True, user_id: UUID | None = None) -> dict[str, Any]:
+    key = _cache_key(question, document_id, user_id)
     if use_cache:
         cached = get_json(key)
         if cached and "fused" in cached and "query_plan" in cached:
@@ -315,8 +315,8 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
             return cached
 
     plan = understand_query(question)
-    vector_ids = hybrid_index.vector_search(question, TOP_K_VECTOR, document_id)
-    bm25_ids = hybrid_index.bm25_search(plan["lexical_query"], TOP_K_BM25, document_id)
+    vector_ids = hybrid_index.vector_search(question, TOP_K_VECTOR, document_id, user_id)
+    bm25_ids = hybrid_index.bm25_search(plan["lexical_query"], TOP_K_BM25, document_id, user_id)
     fused = reciprocal_rank_fusion([vector_ids, bm25_ids])
     candidate_ids = [node_id for node_id, _score in fused[:RERANK_CANDIDATES]]
 
@@ -405,13 +405,15 @@ def build_query_flow(
     result: dict[str, Any],
     answer: str,
     llm_skipped: bool,
+    user_id: UUID | None = None,
 ) -> dict[str, dict[str, Any]]:
     doc_meta = None
     counts = node_counts(UUID(document_id) if document_id else None)
     preview: list[dict[str, Any]] = []
     if document_id:
-        doc_meta = fetch_document(UUID(document_id))
-        preview = tree_preview(UUID(document_id), limit=40)
+        doc_meta = fetch_document(UUID(document_id), user_id) if user_id else None
+        if doc_meta:
+            preview = tree_preview(UUID(document_id), limit=40)
     tree_lines = [
         f"{item.get('path') or '-'} [{item['node_type']}] {item.get('heading') or ''}"
         for item in preview

@@ -28,6 +28,7 @@ class HybridIndex:
         self.ids: list[str] = []
         self.document_ids: list[str] = []
         self.tokenized: list[list[str]] = []
+        self.version: str | None = None
 
     def load_or_rebuild(self) -> None:
         ensure_data_dirs()
@@ -38,9 +39,9 @@ class HybridIndex:
         log.info("Rebuilding BM25 index from Postgres")
         self.rebuild_bm25()
 
-    def rebuild_bm25(self) -> None:
+    def rebuild_bm25(self, user_id: UUID | None = None) -> None:
         ensure_data_dirs()
-        rows = fetch_all_index_rows()
+        rows = fetch_all_index_rows(user_id)
         self.ids = [str(row["id"]) for row in rows]
         self.document_ids = [str(row["document_id"]) for row in rows]
         texts = [row["search_text"] or "" for row in rows]
@@ -71,42 +72,71 @@ class HybridIndex:
             self.ids = payload["ids"]
             self.document_ids = payload["document_ids"]
             self.tokenized = payload["tokenized"]
+            self.version = payload.get("version")
             self.bm25 = BM25Okapi(self.tokenized) if self.tokenized else None
+            log.info("Loaded BM25 index (version: %s)", self.version)
             return True
         except Exception as exc:
             log.warning("Could not load BM25 pickle: %s", exc)
             return False
 
     def _save_bm25(self) -> None:
-        with BM25_PATH.open("wb") as handle:
+        # Write to temporary file first, then atomically replace
+        temp_path = BM25_PATH.with_suffix(".pkl.tmp")
+        with temp_path.open("wb") as handle:
             pickle.dump(
                 {
                     "ids": self.ids,
                     "document_ids": self.document_ids,
                     "tokenized": self.tokenized,
+                    "version": self._get_version(),
                 },
                 handle,
             )
+        # Atomic replace
+        temp_path.replace(BM25_PATH)
+        log.info("BM25 index saved atomically to %s", BM25_PATH)
+    
+    def _get_version(self) -> str:
+        """Generate a version identifier for the index based on current state."""
+        import hashlib
+        content = f"{len(self.ids)}-{len(self.document_ids)}"
+        return hashlib.md5(content.encode()).hexdigest()
 
-    def vector_search(self, query: str, limit: int, document_id: str | None = None) -> list[str]:
+    def vector_search(self, query: str, limit: int, document_id: str | None = None, user_id: UUID | None = None) -> list[str]:
         try:
             doc_uuid = UUID(document_id) if document_id else None
-            results = self.vector_store.search(query, limit, doc_uuid)
+            results = self.vector_store.search(query, limit, doc_uuid, user_id)
             return [result["id"] for result in results]
         except Exception as exc:
             log.warning("Vector search failed: %s", exc)
             return []
 
-    def bm25_search(self, query: str, limit: int, document_id: str | None = None) -> list[str]:
+    def bm25_search(self, query: str, limit: int, document_id: str | None = None, user_id: UUID | None = None) -> list[str]:
         if not self.bm25 or not self.ids:
             return []
         scores = self.bm25.get_scores(tokenize(query))
         ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
         ids: list[str] = []
+        
+        # If user_id is provided without document_id, we need to filter by user ownership
+        # Since BM25 index doesn't track user_id, we fetch the user's document_ids first
+        user_document_ids: set[str] = set()
+        if user_id and not document_id:
+            from app.db import connect
+            with connect() as conn:
+                rows = conn.execute(
+                    "SELECT id FROM documents WHERE user_id = %s",
+                    (user_id,),
+                ).fetchall()
+                user_document_ids = {str(row["id"]) for row in rows}
+        
         for index in ranked:
             if scores[index] <= 0:
                 break
             if document_id and self.document_ids[index] != document_id:
+                continue
+            if user_id and not document_id and self.document_ids[index] not in user_document_ids:
                 continue
             ids.append(self.ids[index])
             if len(ids) >= limit:

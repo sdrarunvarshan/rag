@@ -125,7 +125,7 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 
 - **Structure-aware ingest** — headings and tables, not sliding-window chunks
 - **User Authentication** — JWT-based authentication securely protects the application's core endpoints
-- **Complete Document Deletion** — Safely removes rows from Postgres (with cascade), purges related S3 objects in Garage, and dynamically rebuilds the BM25 index
+-**Document deletion** — Removes document records and related data, cleans up associated Garage objects, invalidates the user's retrieval cache, and rebuilds the BM25 index as appropriate. Storage cleanup failures are handled as partial failures and may require reconciliation.
 - **Image extraction and storage** — Docling extracts images; Garage stores them via a robust `boto3` client; PostgreSQL holds metadata references
 - **Query understanding** — type, scope, and concepts drive expansion and BM25 query shaping
 - **PostgreSQL as source of truth** for document trees and image metadata
@@ -214,7 +214,7 @@ alembic.ini               Alembic configuration
 ## Prerequisites
 
 - [uv](https://github.com/astral-sh/uv)
-- Python 3.10+
+- Python 3.12+
 - PostgreSQL on `localhost:5432`
 - Valkey or Redis on `127.0.0.1:6379` (optional but recommended)
 - Docker (for Garage storage)
@@ -490,11 +490,11 @@ Once the server starts, access the application at:
 
 - **API:** http://localhost:8000
 - **Interactive API documentation:** http://localhost:8000/docs
-- **Temporal Web UI:** http://localhost:8080
+- **Temporal Web UI:** http://localhost:8233
 
 ### 4. Monitor Temporal Workflows
 
-Open the [Temporal Web UI](http://localhost:8080) to inspect workflow executions, execution status, and activity progress.
+Open the [Temporal Web UI](http://localhost:8233) to inspect workflow executions, execution status, and activity progress.
 
 If document ingestion does not complete, check the Temporal workflow status and the worker logs for pending activities, connection failures, or execution errors.
 
@@ -529,11 +529,11 @@ Without Temporal, the API falls back to direct execution. All functionality rema
 | `POST` | `/auth/register` | Register a new user |
 | `POST` | `/auth/login` | Login and receive a JWT access token |
 | `GET` | `/auth/me` | Get current authenticated user details (Protected) |
-| `GET` | `/health` | Postgres, Valkey, and Garage ping |
+| `GET` | `/health` | Service health and dependency status, including optional-service   availability |
 | `GET` | `/documents` | Indexed documents (Protected, requires Bearer token) |
 | `DELETE` | `/documents/{document_id}` | Complete deletion from Postgres and Garage (Protected) |
 | `GET` | `/documents/{document_id}/images` | Get images for a document (Protected) |
-| `GET` | `/images/{image_id}` | Serve raw image file or redirect to storage |
+| `GET` | `/images/{image_id}` | Serve an image after validating document ownership (Protected) |
 | `POST` | `/ingest` | Multipart PDF (`file`) (Protected) |
 | `POST` | `/query` | Question + optional `document_id` (complete response, Protected) |
 | `POST` | `/query/stream` | Question + optional `document_id` (SSE stream: retrieved → tokens → done, Protected) |
@@ -596,7 +596,7 @@ The project exposes the Structure-Aware RAG pipeline through the [Model Context 
 
 ### Transport
 
-The MCP server uses **stdio** transport. The client spawns the server as a subprocess and communicates via stdin/stdout.
+This server uses **local stdio** transport (client spawns it as a subprocess) with no per-user auth or tenant isolation, so tools may bypass document ownership checks. Use it only in a trusted single-user environment — don't expose it as a multi-user service until auth/authz is enforced at the MCP boundary.
 
 ```bash
 uv run python -m app.my_server
@@ -675,6 +675,16 @@ results = evaluator.evaluate_dataset(
 - **Answer Relevance** — answers address the user's question
 - **Context Precision** — retrieved context is relevant
 - **Context Recall** — all relevant information was retrieved
+
+### Security regression tests
+
+Run the focused tests for tenant isolation, upload handling, database migrations, health and observability, and Temporal/Garage behavior:
+
+```bash
+uv run pytest tests/test_tenant_isolation.py tests/test_upload_handling.py tests/test_schema_migrations.py tests/test_health_observability.py tests/test_temporal_garage.py -v
+```
+
+These tests should be run against the current code before claiming the security fixes are verified.
 
 ### DeepEval CI/CD testing
 
