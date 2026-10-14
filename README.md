@@ -676,6 +676,41 @@ results = evaluator.evaluate_dataset(
 - **Context Precision** — retrieved context is relevant
 - **Context Recall** — all relevant information was retrieved
 
+### Request correlation and error handling
+
+The API uses request IDs to correlate HTTP responses with application logs. Request IDs are included in response headers and are available for request-level logging. Centralized exception handlers return sanitized error responses instead of exposing unexpected internal exception details. The logging layer includes targeted redaction for selected sensitive patterns; this is not a guarantee that all personally identifiable information (PII) is removed from every log.
+
+**Request IDs:**
+
+Every HTTP request receives a unique request ID (UUID) that is:
+- Added to the `X-Request-ID` response header
+- Available via `request.state.request_id` in endpoints
+- Included in all log statements for correlation
+- Can be supplied via `X-Request-ID` request header for external tracing
+
+**Error handling:**
+
+- HTTP exceptions return safe error messages with request IDs
+- Validation errors return structured error details
+- General exceptions return generic error messages (no internal details exposed)
+- All errors are logged with full details server-side
+- PII redaction applied to email addresses, credit cards, and SSNs in logs
+
+**Example response headers:**
+
+```
+X-Request-ID: 550e8400-e29b-41d4-a716-446655440000
+```
+
+**Example error response:**
+
+```json
+{
+  "error": "An internal error occurred",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
 ### Security regression tests
 
 Run the focused tests for tenant isolation, upload handling, database migrations, health and observability, and Temporal/Garage behavior:
