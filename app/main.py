@@ -308,6 +308,38 @@ def documents(current_user: dict = Depends(get_current_user)) -> dict:
     return {"documents": items}
 
 
+@app.get("/query-history")
+def query_history(
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Fetch query history for the authenticated user."""
+    if not db.ping():
+        raise HTTPException(status_code=503, detail="Postgres is not reachable")
+    user_uuid = UUID(current_user["id"])
+    history = db.fetch_query_history(user_uuid, limit=limit)
+    return {"history": history}
+
+
+@app.delete("/query-history/{query_id}")
+def delete_query_history(
+    query_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Delete a query from history (only if it belongs to the user)."""
+    if not db.ping():
+        raise HTTPException(status_code=503, detail="Postgres is not reachable")
+    try:
+        query_uuid = UUID(query_id)
+        user_uuid = UUID(current_user["id"])
+        deleted = db.delete_query_history(query_uuid, user_uuid)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Query not found or access denied")
+        return {"deleted": True}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid query ID")
+
+
 @app.delete("/documents/{document_id}")
 def delete_document_endpoint(
     document_id: str,
@@ -589,6 +621,19 @@ async def query(
     else:
         log.info("Using direct execution for query (Temporal unavailable), request_id=%s", request_id)
         packed = run_rag_pipeline(body.question, resolved_doc_id, user_uuid)
+
+    # Save query to history
+    try:
+        db.save_query_history(
+            user_id=user_uuid,
+            question=body.question,
+            answer=packed.get("answer"),
+            document_id=UUID(resolved_doc_id) if resolved_doc_id else None,
+            sources=packed.get("sources"),
+        )
+    except Exception as exc:
+        log.warning("Failed to save query history: %s", exc)
+        # Don't fail the query if history save fails
 
     return QueryResponse(**packed)
 

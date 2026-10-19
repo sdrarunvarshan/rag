@@ -569,6 +569,8 @@ Without Temporal, the API falls back to direct execution. All functionality rema
 | `POST` | `/query` | Question + optional `document_id` (complete response, Protected) |
 | `POST` | `/query/stream` | Question + optional `document_id` (SSE stream: retrieved → tokens → done, Protected) |
 
+| `GET` | `/query-history` | Query history for authenticated user (Protected) |
+| `DELETE` | `/query-history/{query_id}` | Delete a query from history (Protected) |
 ### Ingest
 
 ```bash
