@@ -12,10 +12,12 @@ export default function DashboardPage() {
   const [question, setQuestion] = useState("");
   const [selectedDocument, setSelectedDocument] = useState<string>("");
   const [answer, setAnswer] = useState("");
+  const [streamingAnswer, setStreamingAnswer] = useState("");
+  const [streamStatus, setStreamStatus] = useState<"idle" | "retrieving" | "generating" | "done" | "error">("idle");
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [activeTab, setActiveTab] = useState<"query" | "documents" | "history">("query");
+  const [activeTab, setActiveTab] = useState<"query" | "stream" | "documents" | "history">("query");
   const [error, setError] = useState("");
   const [darkMode, setDarkMode] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
@@ -115,6 +117,78 @@ export default function DashboardPage() {
       setAnswer(data.answer || "No answer generated");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Query failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStreamQuery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setStreamingAnswer("");
+    setStreamStatus("retrieving");
+    setLoading(true);
+
+    const token = localStorage.getItem("token");
+    
+    try {
+      const response = await fetch(`${API_URL}/query/stream`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "event-stream",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ 
+          question,
+          document_id: selectedDocument || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Stream request failed");
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("Response body is not readable");
+      }
+
+      const decoder = new TextDecoder();
+      
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              if (data.event === 'retrieved') {
+                setStreamStatus('generating');
+                setStreamingAnswer(`📚 Retrieved ${data.sources?.length || 0} sources...`);
+              } else if (data.event === 'token') {
+                setStreamStatus('generating');
+                setStreamingAnswer(prev => prev + data.text);
+              } else if (data.event === 'done') {
+                setStreamStatus('done');
+                setStreamingAnswer(data.answer || "No answer generated");
+              } else if (data.event === 'error') {
+                setStreamStatus('error');
+                setError(data.detail || 'An error occurred');
+              }
+            } catch (err) {
+              console.error('Failed to parse SSE data:', err);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Stream failed");
+      setStreamStatus("error");
     } finally {
       setLoading(false);
     }
@@ -307,6 +381,18 @@ export default function DashboardPage() {
             Query Documents
           </button>
           <button
+            onClick={() => setActiveTab("stream")}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              activeTab === "stream"
+                ? "bg-indigo-600 text-white"
+                : darkMode
+                ? "bg-gray-800 text-gray-300 hover:bg-gray-700"
+                : "bg-white text-gray-700 hover:bg-gray-100"
+            }`}
+          >
+            Stream Query (Real-time)
+          </button>
+          <button
             onClick={() => setActiveTab("documents")}
             className={`px-4 py-2 rounded-lg font-medium transition ${
               activeTab === "documents"
@@ -421,6 +507,81 @@ export default function DashboardPage() {
                   Check Readiness
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Stream Query Tab */}
+        {activeTab === "stream" && (
+          <div className="space-y-6">
+            <div className={`${darkMode ? "bg-gray-800" : "bg-white"} rounded-xl shadow-sm p-6`}>
+              <h2 className={`text-xl font-semibold ${darkMode ? "text-white" : "text-gray-900"} mb-4`}>
+                Stream Query (Real-time)
+              </h2>
+              
+              {/* Advanced Search Filters */}
+              <div className="mb-4 p-4 bg-gray-50 rounded-lg">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Filter by Document (Optional)
+                </label>
+                <select
+                  value={selectedDocument}
+                  onChange={(e) => setSelectedDocument(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                >
+                  <option value="">All Documents</option>
+                  {documents.map((doc) => (
+                    <option key={doc.id} value={doc.id}>
+                      {doc.filename}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <form onSubmit={handleStreamQuery} className="space-y-4">
+                <textarea
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  required
+                  rows={3}
+                  className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+                    darkMode
+                      ? "bg-gray-700 border-gray-600 text-white"
+                      : "border-gray-300"
+                  }`}
+                  placeholder="Ask a question about your documents..."
+                />
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-semibold py-2 px-6 rounded-lg transition duration-200"
+                >
+                  {loading ? "Streaming..." : "Stream Ask"}
+                </button>
+              </form>
+
+              {/* Stream Status */}
+              {streamStatus !== "idle" && (
+                <div className="mt-6 p-4 bg-indigo-50 border border-indigo-200 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <h3 className="font-semibold text-gray-900">Status:</h3>
+                    <span className={`text-sm font-medium ${
+                      streamStatus === "retrieving" ? "text-blue-600" :
+                      streamStatus === "generating" ? "text-green-600" :
+                      streamStatus === "done" ? "text-indigo-600" :
+                      "text-red-600"
+                    }`}>
+                      {streamStatus === "retrieving" && "🔍 Retrieving context..."}
+                      {streamStatus === "generating" && "✨ Generating answer..."}
+                      {streamStatus === "done" && "✅ Complete"}
+                      {streamStatus === "error" && "❌ Error"}
+                    </span>
+                  </div>
+                  {streamingAnswer && (
+                    <p className="text-gray-700 whitespace-pre-wrap">{streamingAnswer}</p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -7,6 +7,11 @@ A modern Next.js frontend for the Structure-Aware RAG application.
 - **Authentication**: Login and register with JWT tokens
 - **Document Management**: Upload, view, and delete PDF documents
 - **Query Interface**: Ask questions about your documents with structure-aware retrieval
+- **Streaming Responses**: Real-time token-by-token answer generation with live status updates
+- **Advanced Search**: Filter queries by specific document or search across all documents
+- **Query History**: View past queries with answers, timestamps, and source information
+- **Export History**: Export query history as PDF for sharing or archiving
+- **Dark Mode**: Toggle between light and dark themes for comfortable viewing
 - **Health Monitoring**: Check system health and readiness
 - **Multi-tenant Support**: User-specific document isolation
 - **Responsive Design**: Clean, modern UI with Tailwind CSS
@@ -56,11 +61,45 @@ A modern Next.js frontend for the Structure-Aware RAG application.
 
 ### 4. Query Documents
 - Click "Query Documents" tab
+- Optionally select a specific document from the dropdown (advanced search)
 - Type your question in the text area
 - Click "Ask"
 - The answer will appear below
 
-### 5. Check System Health
+### 5. Stream Query (Real-time)
+- Click "Stream Query (Real-time)" tab
+- Optionally select a specific document from the dropdown
+- Type your question in the text area
+- Click "Stream Ask"
+- Watch the answer generate in real-time:
+  - First shows "Retrieving context..." as it searches
+  - Then streams the answer token by token
+  - Shows "Complete" when finished
+- Better for long answers and interactive experience
+
+### 5. Advanced Search
+- Use the document filter dropdown to search a specific document
+- Select "All Documents" to search across all uploaded documents
+- The backend filters results to only include the selected document's content
+
+### 6. Query History
+- Click "Query History" tab
+- View all past queries with answers and timestamps
+- See the number of sources used for each query
+- Delete individual queries if needed
+
+### 7. Export History as PDF
+- Click "Query History" tab
+- Click "Export as PDF" button
+- PDF file will download with all your queries and answers
+- Format includes questions, answers, and timestamps
+
+### 8. Toggle Dark Mode
+- Click the sun/moon icon in the header
+- Theme toggles instantly between light and dark modes
+- Preference is saved for future visits
+
+### 9. Check System Health
 - Use the "Check Health" and "Check Readiness" buttons
 - View the status of backend services
 
@@ -70,6 +109,7 @@ A modern Next.js frontend for the Structure-Aware RAG application.
 - **TypeScript** for type safety
 - **Tailwind CSS** for styling
 - **React 19** for UI components
+- **jsPDF** for PDF generation
 
 ## API Integration
 
@@ -89,7 +129,12 @@ When presenting this project:
 
 2. **Demonstrate Features**:
    - Upload a PDF and show it appearing in the document list
-   - Ask a question and show the retrieved answer
+   - Ask a question using the regular "Query Documents" tab
+   - Use "Stream Query (Real-time)" to show token-by-token generation
+   - Use advanced search to filter by specific document
+   - Show query history with answers and timestamps
+   - Export query history as PDF
+   - Toggle dark mode for comfortable viewing
    - Show the health check endpoints
    - Demonstrate user isolation (register two users, show they can't see each other's documents)
 
@@ -123,9 +168,12 @@ When presenting this project:
 
 ## Future Enhancements
 
-- Streaming responses for real-time answers
 - Document preview in browser
-- Advanced search filters
-- Query history
-- Export results
-- Dark mode toggle
+- More advanced search filters (date range, content type, metadata)
+- Query history search and pagination
+- More export formats (CSV, JSON, Markdown)
+- Custom themes and color schemes
+- Query analytics and statistics
+- Collaboration features (share queries with other users)
+- Voice input for queries
+- Multiple languages support
