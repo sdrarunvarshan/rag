@@ -148,7 +148,7 @@ class HybridIndex:
         # Build fingerprint from IDs and text content
         fingerprint_parts = []
         for row in sorted_rows:
-            fingerprint_parts.append(f"{row['id']}:{row['document_id']}:{(row['search_text'] or '')[:100]}")
+            fingerprint_parts.append(f"{row['id']}:{row['document_id']}:{row['search_text'] or ''}")
         
         content = "|".join(fingerprint_parts)
         return hashlib.sha256(content.encode()).hexdigest()

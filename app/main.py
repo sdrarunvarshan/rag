@@ -7,7 +7,7 @@ import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
-
+from fastapi.exceptions import RequestValidationError
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
