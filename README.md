@@ -170,8 +170,8 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 ```
 app/
   main.py                 FastAPI routes: /, /health, /documents, /ingest, /query
-  my_server.py            FastMCP MCP server and RAG tools
-  agent.py                AI agent that uses MCP tools with Qwen LLM
+  my_server.py            FastMCP server with user-aware and legacy tool sets
+  agent.py                Qwen tool-calling agent with optional user-aware MCP client
   test_agent.py           Test script for MCP server connectivity
   ingest.py               Docling PDF → structured nodes + images
   query_understand.py     Query type, scope, concepts, expansion plan
@@ -414,6 +414,7 @@ Edit `.env` and set `HF_TOKEN`. **Do not commit `.env`.**
 | `LLM_PRESENCE_PENALTY` | Default `1.5` |
 | `LLM_TOP_K` | Passed as `extra_body.top_k` (default `20`) |
 | `EMBEDDING_MODEL` | Default `sentence-transformers/all-MiniLM-L6-v2` |
+| `MCP_USER_ID` | Optional user UUID used by `app.my_server` when starting in user-aware  mode. If unset, the server uses legacy single-user mode. |
 | `CACHE_TTL_SECONDS` | Default `3600` |
 | `TEMPORAL_HOST` | Temporal server host (default `localhost`) |
 | `TEMPORAL_PORT` | Temporal server port (default `7233`) |
@@ -594,39 +595,89 @@ The project exposes the Structure-Aware RAG pipeline through the [Model Context 
 | `cache_health` | Valkey and Garage availability |
 | `rag_health` | Basic RAG service health |
 
-### Transport
+### Transport and tenant isolation
 
-This server uses **local stdio** transport (client spawns it as a subprocess) with no per-user auth or tenant isolation, so tools may bypass document ownership checks. Use it only in a trusted single-user environment — don't expose it as a multi-user service until auth/authz is enforced at the MCP boundary.
+The MCP interface uses FastMCP with local stdio transport. The AI agent launches the MCP server as a subprocess.
+
+The server supports two operating modes:
+
+- **User-aware mode:** `create_rag_mcp_server(user_id)` creates an MCP server whose document tools receive a server-side user context. The server can obtain the user ID from the `MCP_USER_ID` environment variable when launched directly.
+- **Legacy single-user mode:** `create_legacy_mcp_server()` exposes legacy tools without a user-specific tenant context. Use this only for trusted, single-user local development.
+
+In user-aware mode, the document tools pass the injected user ID to the existing RAG pipeline and document database functions. This is intended to enforce tenant-scoped access, provided the underlying retrieval and database functions correctly apply the user filter.
+
+**Security considerations:**
+
+- Authenticate users at the application or trusted gateway boundary.
+- Derive the user ID from the authenticated session or verified JWT, not from an untrusted LLM tool argument.
+- Do not expose legacy single-user tools to untrusted or multi-user clients.
+- Stdio is a local process transport, not an authentication mechanism.
+- Verify that FastMCP excludes the injected `user_id` parameter from the LLM-facing tool schema before relying on the claim that the model cannot supply it.
+
+Run the MCP server locally:
 
 ```bash
 uv run python -m app.my_server
 ```
 
+For user-aware mode, set `MCP_USER_ID` to a valid user UUID in the environment before launching the server.
+
+```
+
 ### AI agent
 
-`app/agent.py` connects to the MCP server and uses Qwen (via Hugging Face) with function calling to answer questions using the RAG tools.
+`app/agent.py` implements an AI agent that connects to the FastMCP server and uses Qwen through the Hugging Face Inference Router for tool calling.
 
-1. Start the MCP server:
+The agent:
 
-   ```bash
-   uv run python -m app.my_server
-   ```
+1. Connects to the MCP server using `FastMCP Client` and `StdioTransport`.
+2. Discovers available MCP tools and their input schemas.
+3. Converts MCP tool definitions into OpenAI-compatible function tools.
+4. Sends the user's question to Qwen with automatic tool selection.
+5. Executes the requested MCP tools and returns their results to the model.
+6. Produces a final natural-language response.
 
-2. In a separate terminal, run the agent:
+#### User-aware execution
 
-   ```bash
-   uv run python -m app.agent
-   ```
+The agent exposes:
 
-The agent prompts for a question and uses the MCP tools to produce grounded answers.
+```python
+async def ask(
+    question: str,
+    user_id: str | UUID | None = None,
+):
+    ...
+```
 
-### Test MCP connection
+When `user_id` is provided, `create_mcp_client_with_user()` creates a dedicated MCP client whose subprocess receives the `MCP_USER_ID` environment variable.
+
+When `user_id` is omitted, the agent uses the legacy single-user client.
+
+**Important:** The caller must obtain `user_id` from a trusted authentication context. The command-line argument and environment variable are not authentication mechanisms by themselves.
+
+#### Run the agent
+
+Start the agent from the project root:
+
+```bash
+uv run python -m app.agent
+```
+
+Enter a question when prompted. To use user-aware mode, pass a valid user UUID as the first command-line argument:
+
+```bash
+uv run python -m app.agent <USER_UUID>
+```
+
+The command-line argument is suitable for local testing. In a deployed application, pass the authenticated user's ID from the backend rather than accepting an arbitrary user ID from a client.
+
+#### Test MCP connectivity
 
 ```bash
 uv run python -m app.test_agent
 ```
 
-Lists available MCP tools and their descriptions.
+This script can be used to inspect MCP connectivity and available tools.
 
 ---
 
