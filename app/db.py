@@ -186,11 +186,14 @@ def check_alembic_migration() -> bool:
     Check if the database is at the expected Alembic migration head.
     
     Returns True if migrations are up to date, False otherwise.
-    This is a basic check - for production, use Alembic's API directly.
+    Compares current database revision with Alembic's head revision.
     """
     try:
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+        
+        # Get current database version
         with connect() as conn:
-            # Check if alembic_version table exists
             row = conn.execute(
                 """
                 SELECT EXISTS (
@@ -204,18 +207,37 @@ def check_alembic_migration() -> bool:
                 log.warning("Alembic version table not found - run 'alembic upgrade head'")
                 return False
             
-            # Check current version
             version_row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
             if not version_row:
                 log.warning("No Alembic version found - run 'alembic upgrade head'")
                 return False
             
             current_version = version_row["version_num"]
-            log.info("Current Alembic version: %s", current_version)
-            
-            # In production, you would compare this against the expected head revision
-            # For now, we just log the version and return True if the table exists
-            return True
+        
+        # Get Alembic head revision
+        config = Config("alembic.ini")
+        script = ScriptDirectory.from_config(config)
+        head_revision = script.get_current_head()
+        
+        if not head_revision:
+            log.warning("Could not determine Alembic head revision")
+            return False
+        
+        head_revision_id = head_revision.revision
+        
+        log.info("Current Alembic version: %s, Head revision: %s", current_version, head_revision_id)
+        
+        # Compare versions
+        if current_version != head_revision_id:
+            log.error(
+                "Database is behind Alembic head. Current: %s, Head: %s. Run 'alembic upgrade head'",
+                current_version,
+                head_revision_id,
+            )
+            return False
+        
+        log.info("Database is at Alembic head revision: %s", current_version)
+        return True
             
     except Exception as exc:
         log.warning("Failed to check Alembic migration status: %s", exc)

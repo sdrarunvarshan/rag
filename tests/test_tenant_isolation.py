@@ -361,5 +361,51 @@ def test_cache_invalidation_with_tracking(setup_test_documents):
     invalidate_user_cache(str(user2_id))
 
 
+def test_bm25_text_change_triggers_rebuild(setup_test_documents):
+    """Test that BM25 index rebuilds when text content changes."""
+    from app.index import hybrid_index
+    
+    user1_id = setup_test_documents["user1_id"]
+    doc1_id = setup_test_documents["doc1_id"]
+    
+    # Create a node with initial text
+    node_id = uuid4()
+    initial_text = "Initial content for testing"
+    
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO nodes (id, document_id, node_type, heading, text, search_text, page, path) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (node_id, doc1_id, "section", "Test Section", initial_text, initial_text, 1, "1"),
+        )
+        conn.commit()
+    
+    try:
+        # Rebuild BM25 index
+        hybrid_index.rebuild_bm25()
+        initial_fingerprint = hybrid_index._get_corpus_fingerprint()
+        
+        # Modify the text content without changing node ID
+        modified_text = "Modified content for testing"
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE nodes SET text = %s, search_text = %s WHERE id = %s",
+                (modified_text, modified_text, node_id),
+            )
+            conn.commit()
+        
+        # Check that fingerprint changed
+        modified_fingerprint = hybrid_index._get_corpus_fingerprint()
+        assert initial_fingerprint != modified_fingerprint, "Fingerprint should change when text changes"
+        
+        # Reload and verify it triggers rebuild
+        hybrid_index.load_or_rebuild()
+        assert hybrid_index.version == modified_fingerprint, "Index should have new fingerprint after rebuild"
+    finally:
+        # Cleanup
+        with db.connect() as conn:
+            conn.execute("DELETE FROM nodes WHERE id = %s", (node_id,))
+            conn.commit()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

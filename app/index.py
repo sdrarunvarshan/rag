@@ -34,8 +34,15 @@ class HybridIndex:
         ensure_data_dirs()
         loaded = self._load_bm25()
         if loaded and self.ids:
-            log.info("Loaded BM25 index (%s nodes)", len(self.ids))
-            return
+            # Calculate current corpus fingerprint
+            current_fingerprint = self._get_corpus_fingerprint()
+            # Compare with loaded version
+            if self.version == current_fingerprint:
+                log.info("Loaded BM25 index (%s nodes, version matches)", len(self.ids))
+                return
+            else:
+                log.info("BM25 index version mismatch: stored=%s, current=%s - rebuilding", 
+                         self.version, current_fingerprint)
         log.info("Rebuilding BM25 index from Postgres")
         self.rebuild_bm25()
 
@@ -102,7 +109,7 @@ class HybridIndex:
                     "ids": self.ids,
                     "document_ids": self.document_ids,
                     "tokenized": self.tokenized,
-                    "version": self._get_version(),
+                    "version": self._get_corpus_fingerprint(),  # Save corpus fingerprint
                 },
                 handle,
             )
@@ -114,14 +121,36 @@ class HybridIndex:
         """
         Generate a content-based version identifier for the index.
 
-        Uses a hash of all node IDs and document IDs to detect changes
-        even when counts remain the same (e.g., replacing content).
+        Uses a hash of all node IDs, document IDs, and text content to detect changes
+        even when IDs remain the same but text changes.
         """
         import hashlib
         # Sort for deterministic hashing
         sorted_ids = sorted(self.ids)
         sorted_doc_ids = sorted(self.document_ids)
         content = f"{','.join(sorted_ids)}-{','.join(sorted_doc_ids)}"
+        return hashlib.sha256(content.encode()).hexdigest()
+    
+    def _get_corpus_fingerprint(self) -> str:
+        """
+        Generate a corpus fingerprint including text content to detect stale indexes.
+        
+        This hashes node IDs, document IDs, and text content to ensure that
+        if any node's text changes, the fingerprint changes and triggers a rebuild.
+        """
+        import hashlib
+        # Fetch all indexed rows with text content
+        rows = fetch_all_index_rows(user_id=None)
+        
+        # Sort for deterministic hashing
+        sorted_rows = sorted(rows, key=lambda r: (str(r["id"]), str(r["document_id"])))
+        
+        # Build fingerprint from IDs and text content
+        fingerprint_parts = []
+        for row in sorted_rows:
+            fingerprint_parts.append(f"{row['id']}:{row['document_id']}:{(row['search_text'] or '')[:100]}")
+        
+        content = "|".join(fingerprint_parts)
         return hashlib.sha256(content.encode()).hexdigest()
 
     def vector_search(self, query: str, limit: int, document_id: str | None = None, user_id: UUID | None = None) -> list[str]:
@@ -140,10 +169,10 @@ class HybridIndex:
         ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
         ids: list[str] = []
         
-        # If user_id is provided without document_id, we need to filter by user ownership
-        # Since BM25 index doesn't track user_id, we fetch the user's document_ids first
+        # If user_id is provided, fetch the user's document_ids for ownership filtering
+        # This applies both for corpus-wide searches AND document-scoped searches
         user_document_ids: set[str] = set()
-        if user_id and not document_id:
+        if user_id:
             from app.db import connect
             with connect() as conn:
                 rows = conn.execute(
@@ -155,9 +184,11 @@ class HybridIndex:
         for index in ranked:
             if scores[index] <= 0:
                 break
+            # Filter by document_id if specified
             if document_id and self.document_ids[index] != document_id:
                 continue
-            if user_id and not document_id and self.document_ids[index] not in user_document_ids:
+            # Filter by user_id if specified (applies to both corpus-wide and document-scoped)
+            if user_id and self.document_ids[index] not in user_document_ids:
                 continue
             ids.append(self.ids[index])
             if len(ids) >= limit:

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from temporalio.client import Client
@@ -460,9 +460,9 @@ def image_file(
 
 @app.post("/ingest")
 async def ingest(
+    request: Request,
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
-    request: Request,
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Upload a PDF file")
@@ -554,9 +554,9 @@ def _resolved_document_id(document_id: str | None, user_id: str) -> str | None:
 
 @app.post("/query", response_model=QueryResponse)
 async def query(
+    request: Request,
     body: QueryRequest,
     current_user: dict = Depends(get_current_user),
-    request: Request,
 ) -> QueryResponse:
     if not db.ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
@@ -595,9 +595,9 @@ async def query(
 
 @app.post("/query/stream")
 def query_stream(
+    request: Request,
     body: QueryRequest,
     current_user: dict = Depends(get_current_user),
-    request: Request,
 ):
     """
     Streaming SSE endpoint for real-time conversational chat response.
