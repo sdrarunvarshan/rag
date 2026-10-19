@@ -400,6 +400,19 @@ def test_bm25_text_change_triggers_rebuild(setup_test_documents):
         # Reload and verify it triggers rebuild
         hybrid_index.load_or_rebuild()
         assert hybrid_index.version == modified_fingerprint, "Index should have new fingerprint after rebuild"
+        
+        # Test edge case: text with delimiters shouldn't cause ambiguity
+        text_with_delimiters = "Chapter 1: Introduction | Section A"
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE nodes SET text = %s, search_text = %s WHERE id = %s",
+                (text_with_delimiters, text_with_delimiters, node_id),
+            )
+            conn.commit()
+        
+        # Should still generate valid fingerprint without ambiguity
+        delimiter_fingerprint = hybrid_index._get_corpus_fingerprint()
+        assert delimiter_fingerprint != modified_fingerprint, "Fingerprint should change with delimiter-containing text"
     finally:
         # Cleanup
         with db.connect() as conn:

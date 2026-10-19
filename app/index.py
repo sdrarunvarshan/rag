@@ -137,20 +137,29 @@ class HybridIndex:
         
         This hashes node IDs, document IDs, and text content to ensure that
         if any node's text changes, the fingerprint changes and triggers a rebuild.
+        
+        Uses JSON serialization for unambiguous fingerprinting (no delimiter conflicts).
         """
         import hashlib
+        import json
+        
         # Fetch all indexed rows with text content
         rows = fetch_all_index_rows(user_id=None)
         
         # Sort for deterministic hashing
         sorted_rows = sorted(rows, key=lambda r: (str(r["id"]), str(r["document_id"])))
         
-        # Build fingerprint from IDs and text content
-        fingerprint_parts = []
-        for row in sorted_rows:
-            fingerprint_parts.append(f"{row['id']}:{row['document_id']}:{row['search_text'] or ''}")
+        # Build fingerprint using JSON serialization (unambiguous)
+        fingerprint_data = [
+            {
+                "id": str(row["id"]),
+                "document_id": str(row["document_id"]),
+                "text": (row["search_text"] or "")[:100]
+            }
+            for row in sorted_rows
+        ]
         
-        content = "|".join(fingerprint_parts)
+        content = json.dumps(fingerprint_data, sort_keys=True)
         return hashlib.sha256(content.encode()).hexdigest()
 
     def vector_search(self, query: str, limit: int, document_id: str | None = None, user_id: UUID | None = None) -> list[str]:
