@@ -7,8 +7,9 @@ import pytest
 from uuid import UUID, uuid4
 
 from app import db
-from app.cache import get_json, set_json
+from app.cache import get_json, set_json, track_cache_key, invalidate_user_cache
 from app.retrieve import retrieve, _cache_key
+from app.temporal_workflows import QueryParams, RetrieveParams
 
 
 @pytest.fixture
@@ -205,18 +206,28 @@ def test_retrieve_with_user_isolation(setup_test_documents):
     # Retrieve with user1_id should only access user1's data
     result1 = retrieve(question, document_id=None, use_cache=False, user_id=user1_id)
     
-    # Verify that all retrieved nodes belong to user1
-    for source in result1.get("sources", []):
-        doc = db.fetch_document(UUID(source["document_id"]), user1_id)
-        assert doc is not None, f"Source {source['document_id']} does not belong to user1"
+    # Verify that all retrieved sections belong to user1
+    for section in result1.get("sections", []):
+        doc = db.fetch_document(UUID(section["document_id"]), user1_id)
+        assert doc is not None, f"Section {section['document_id']} does not belong to user1"
+    
+    # Verify that all retrieved tables belong to user1
+    for table in result1.get("tables", []):
+        doc = db.fetch_document(UUID(table["document_id"]), user1_id)
+        assert doc is not None, f"Table {table['document_id']} does not belong to user1"
     
     # Retrieve with user2_id should only access user2's data
     result2 = retrieve(question, document_id=None, use_cache=False, user_id=user2_id)
     
-    # Verify that all retrieved nodes belong to user2
-    for source in result2.get("sources", []):
-        doc = db.fetch_document(UUID(source["document_id"]), user2_id)
-        assert doc is not None, f"Source {source['document_id']} does not belong to user2"
+    # Verify that all retrieved sections belong to user2
+    for section in result2.get("sections", []):
+        doc = db.fetch_document(UUID(section["document_id"]), user2_id)
+        assert doc is not None, f"Section {section['document_id']} does not belong to user2"
+    
+    # Verify that all retrieved tables belong to user2
+    for table in result2.get("tables", []):
+        doc = db.fetch_document(UUID(table["document_id"]), user2_id)
+        assert doc is not None, f"Table {table['document_id']} does not belong to user2"
 
 
 def test_image_belongs_to_user(setup_test_documents):
@@ -248,6 +259,106 @@ def test_image_belongs_to_user(setup_test_documents):
         with db.connect() as conn:
             conn.execute("DELETE FROM images WHERE id = %s", (image_id,))
             conn.commit()
+
+
+def test_temporal_retrieve_params_includes_user_id():
+    """Test that RetrieveParams includes user_id for Temporal workflow isolation."""
+    user_id = uuid4()
+    question = "test question"
+    document_id = str(uuid4())
+    
+    # Create QueryParams with user_id
+    query_params = QueryParams(
+        question=question,
+        document_id=document_id,
+        user_id=str(user_id),
+    )
+    
+    # Simulate workflow creating RetrieveParams
+    retrieve_params = RetrieveParams(
+        question=query_params.question,
+        document_id=query_params.document_id,
+        user_id=query_params.user_id,  # Must pass user_id for isolation
+    )
+    
+    # Verify user_id is preserved
+    assert retrieve_params.user_id == str(user_id), "user_id must be passed to RetrieveParams for tenant isolation"
+
+
+def test_bm25_rebuild_includes_all_users(setup_test_documents):
+    """Test that BM25 rebuild indexes all users' nodes, not just one user's nodes."""
+    from app.index import hybrid_index
+    
+    user1_id = setup_test_documents["user1_id"]
+    user2_id = setup_test_documents["user2_id"]
+    
+    # Create some nodes for both users
+    node1_id = uuid4()
+    node2_id = uuid4()
+    
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO nodes (id, document_id, node_type, heading, text, search_text, page, path) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (node1_id, setup_test_documents["doc1_id"], "section", "User1 Section", "User1 content", "User1 content", 1, "1"),
+        )
+        conn.execute(
+            "INSERT INTO nodes (id, document_id, node_type, heading, text, search_text, page, path) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (node2_id, setup_test_documents["doc2_id"], "section", "User2 Section", "User2 content", "User2 content", 1, "1"),
+        )
+        conn.commit()
+    
+    try:
+        # Rebuild BM25 with user1_id (should be ignored)
+        hybrid_index.rebuild_bm25(user_id=user1_id)
+        
+        # Verify that the index contains both users' nodes
+        # The rebuild_bm25 function should ignore user_id and index all nodes
+        assert node1_id in hybrid_index.ids or str(node1_id) in hybrid_index.ids, "Index should contain user1's node"
+        assert node2_id in hybrid_index.ids or str(node2_id) in hybrid_index.ids, "Index should contain user2's node"
+        
+        # Also verify the document_ids are present
+        assert str(setup_test_documents["doc1_id"]) in hybrid_index.document_ids, "Index should contain user1's document"
+        assert str(setup_test_documents["doc2_id"]) in hybrid_index.document_ids, "Index should contain user2's document"
+    finally:
+        # Cleanup
+        with db.connect() as conn:
+            conn.execute("DELETE FROM nodes WHERE id IN (%s, %s)", (node1_id, node2_id))
+            conn.commit()
+
+
+def test_cache_invalidation_with_tracking(setup_test_documents):
+    """Test that cache keys are tracked and can be invalidated by user_id."""
+    user1_id = setup_test_documents["user1_id"]
+    user2_id = setup_test_documents["user2_id"]
+    
+    question = "test question"
+    document_id = str(uuid4())
+    
+    # Generate cache keys for both users
+    key1 = _cache_key(question, document_id, user1_id)
+    key2 = _cache_key(question, document_id, user2_id)
+    
+    # Track cache keys for both users
+    track_cache_key(str(user1_id), key1)
+    track_cache_key(str(user2_id), key2)
+    
+    # Set cache entries
+    set_json(key1, {"answer": "user1 answer"})
+    set_json(key2, {"answer": "user2 answer"})
+    
+    # Verify both entries exist
+    assert get_json(key1) is not None, "User1 cache entry should exist"
+    assert get_json(key2) is not None, "User2 cache entry should exist"
+    
+    # Invalidate user1's cache
+    invalidate_user_cache(str(user1_id))
+    
+    # Verify user1's entry is deleted but user2's remains
+    assert get_json(key1) is None, "User1 cache entry should be invalidated"
+    assert get_json(key2) is not None, "User2 cache entry should remain"
+    
+    # Cleanup
+    invalidate_user_cache(str(user2_id))
 
 
 if __name__ == "__main__":

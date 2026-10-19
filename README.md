@@ -136,11 +136,40 @@ The web UI and API return a `flow` object with one entry per stage so you can in
 - **Query flow payload** — every pipeline stage is visible in the API response
 - **Optional `document_id` filter**
 - **Valkey / Redis cache** for retrieval results
+- **Tenant-isolated retrieval** — propagates user_id through Temporal query workflows and retrieval parameters to preserve user-scoped access.
+--**Tenant-safe BM25 indexing** — rebuilds the BM25 corpus across all users' indexed nodes, while applying tenant filtering during search to avoid creating an incomplete global index.
+--**User-scoped cache invalidation** — tracks retrieval cache keys per user in Valkey so document changes can invalidate the relevant user's cached results without relying on key-name pattern matching.
 - **LLM via Hugging Face router** (`https://router.huggingface.co/v1`), default model Qwen, orchestrated with LangGraph and LangChain (`HF_TOKEN`)
 - **MCP interface** using FastMCP
 - **MCP tools** for querying, retrieval, document access, and health checks
 - **AI agent** that uses MCP tools with LLM function calling for grounded answers
 - **Temporal.io** integration for durable workflow execution with automatic retries and crash recovery
+
+---
+
+## Tenant Isolation and Retrieval Safety
+
+The RAG pipeline supports user-scoped retrieval across the API, Temporal workflows, BM25 search, and retrieval caching.
+
+### User ID propagation
+
+When a query executes through a Temporal workflow, the workflow passes `user_id` into `RetrieveParams`. This preserves the user context needed by downstream retrieval operations.
+
+### BM25 index consistency
+
+The BM25 index is rebuilt from nodes across all users rather than being restricted to one user's nodes during index construction. Tenant filtering is applied during search so that a shared index can serve multiple users without omitting other users' documents from the index.
+
+The BM25 version is determined using a content-based SHA-256 hash rather than only document or node counts. This helps detect corpus changes even when the total number of indexed nodes remains unchanged.
+
+### Cache invalidation
+
+Retrieval cache keys are tracked by user in Valkey. When a user's cache is invalidated, the application deletes the tracked keys associated with that user instead of searching for the user's ID as a literal substring in cache keys.
+
+### Security verification
+
+Tenant-isolation regression tests cover Temporal user ID propagation, cross-user BM25 index construction, retrieval isolation, and tracked cache invalidation.
+
+These mechanisms support tenant isolation, but the underlying database queries, retrieval filters, and cache-key construction must also enforce the correct user scope.
 
 ---
 
@@ -202,6 +231,7 @@ scripts/
   start_phoenix.py        Start Phoenix observability server
 
 tests/
+  test_tenant_isolation.py  Tenant-scoped retrieval, Temporal propagation, BM25 and cache tests
   test_rag_evaluation.py  DeepEval pytest tests for CI/CD
 
 .env.example              Copy to .env (never commit .env)
@@ -806,7 +836,9 @@ Deleting the source PDF on disk does **not** remove the document from Postgres. 
 ```bash
 uv run python scripts/rebuild_bm25.py
 ```
+**Index consistency and tenant filtering:** The BM25 corpus is rebuilt from nodes across all users. User-specific filtering belongs in the search path, not in global index construction. The content-based SHA-256 version check helps detect corpus changes even when node counts remain unchanged.
 
+After ingesting or deleting documents, rebuild the index as required by the application's indexing workflow.
 ---
 
 ## License

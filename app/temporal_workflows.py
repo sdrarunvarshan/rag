@@ -261,10 +261,14 @@ class QueryWorkflow:
 
     @workflow.run
     async def run(self, params: QueryParams) -> dict[str, Any]:
-        # Step 1: Retrieve context
+        # Step 1: Retrieve context with user_id for tenant isolation
         retrieval = await workflow.execute_activity(
             retrieve_activity,
-            RetrieveParams(question=params.question, document_id=params.document_id),
+            RetrieveParams(
+                question=params.question,
+                document_id=params.document_id,
+                user_id=params.user_id,  # Pass user_id for tenant isolation
+            ),
             start_to_close_timeout=timedelta(seconds=60),
         )
 

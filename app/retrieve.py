@@ -6,7 +6,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from app.cache import get_json, set_json
+from app.cache import get_json, set_json, track_cache_key
 from app.config import (
     CONTEXT_CHAR_BUDGET,
     MAX_CHILDREN,
@@ -375,6 +375,9 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
         "reranked": [{"id": node_id, "score": float(score)} for node_id, score in reranked],
     }
     set_json(key, {k: v for k, v in payload.items() if k != "cached"})
+    # Track the cache key for this user to enable invalidation
+    if user_id:
+        track_cache_key(str(user_id), key)
     return payload
 
 

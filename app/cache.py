@@ -51,20 +51,43 @@ def set_json(key: str, value: Any, ttl: int | None = None) -> None:
 
 
 def invalidate_user_cache(user_id: str) -> None:
-    """Invalidate all cache entries for a specific user."""
+    """
+    Invalidate all cache entries for a specific user.
+
+    Since cache keys are hashed (SHA-256), we maintain a tracking set
+    of cache keys per user. This function deletes all tracked keys
+    for the given user and cleans up the tracking set.
+    """
     try:
         client = get_client()
-        # Use SCAN to find all keys matching the user's cache pattern
-        pattern = f"*{user_id}*"
-        cursor = 0
-        keys_to_delete = []
-        while True:
-            cursor, keys = client.scan(cursor, match=pattern, count=100)
-            keys_to_delete.extend(keys)
-            if cursor == 0:
-                break
-        if keys_to_delete:
-            client.delete(*keys_to_delete)
-            log.info("Invalidated %d cache entries for user %s", len(keys_to_delete), user_id)
+        tracking_key = f"rag:user_keys:{user_id}"
+        
+        # Get all cache keys for this user
+        cache_keys = client.smembers(tracking_key)
+        
+        if cache_keys:
+            # Delete the actual cache entries
+            client.delete(*cache_keys)
+            # Delete the tracking set
+            client.delete(tracking_key)
+            log.info("Invalidated %d cache entries for user %s", len(cache_keys), user_id)
+        else:
+            log.info("No cache entries to invalidate for user %s", user_id)
     except Exception as exc:
         log.warning("Failed to invalidate user cache: %s", exc)
+
+
+def track_cache_key(user_id: str, cache_key: str) -> None:
+    """
+    Track a cache key for a specific user to enable invalidation.
+
+    Args:
+        user_id: The user ID
+        cache_key: The cache key to track
+    """
+    try:
+        client = get_client()
+        tracking_key = f"rag:user_keys:{user_id}"
+        client.sadd(tracking_key, cache_key)
+    except Exception as exc:
+        log.warning("Failed to track cache key: %s", exc)

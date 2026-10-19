@@ -40,15 +40,28 @@ class HybridIndex:
         self.rebuild_bm25()
 
     def rebuild_bm25(self, user_id: UUID | None = None) -> None:
+        """
+        Rebuild BM25 index from PostgreSQL.
+
+        IMPORTANT: The shared BM25 index (BM25_PATH) must include ALL users' nodes
+        to prevent cross-tenant isolation bugs. Tenant filtering is applied during
+        search (bm25_search), not during index construction.
+
+        Args:
+            user_id: Ignored for the shared index. Always indexes all users' nodes.
+                    This parameter is kept for API compatibility but not used.
+        """
         ensure_data_dirs()
-        rows = fetch_all_index_rows(user_id)
+        # Always fetch all users' nodes for the shared index
+        # Tenant filtering happens during search, not during index building
+        rows = fetch_all_index_rows(user_id=None)
         self.ids = [str(row["id"]) for row in rows]
         self.document_ids = [str(row["document_id"]) for row in rows]
         texts = [row["search_text"] or "" for row in rows]
         self.tokenized = [tokenize(text) for text in texts]
         self.bm25 = BM25Okapi(self.tokenized) if self.tokenized else None
         self._save_bm25()
-        log.info("Indexed %s nodes (BM25)", len(self.ids))
+        log.info("Indexed %s nodes (BM25, all users)", len(self.ids))
 
     def rebuild(self) -> None:
         self.rebuild_bm25()
@@ -98,10 +111,18 @@ class HybridIndex:
         log.info("BM25 index saved atomically to %s", BM25_PATH)
     
     def _get_version(self) -> str:
-        """Generate a version identifier for the index based on current state."""
+        """
+        Generate a content-based version identifier for the index.
+
+        Uses a hash of all node IDs and document IDs to detect changes
+        even when counts remain the same (e.g., replacing content).
+        """
         import hashlib
-        content = f"{len(self.ids)}-{len(self.document_ids)}"
-        return hashlib.md5(content.encode()).hexdigest()
+        # Sort for deterministic hashing
+        sorted_ids = sorted(self.ids)
+        sorted_doc_ids = sorted(self.document_ids)
+        content = f"{','.join(sorted_ids)}-{','.join(sorted_doc_ids)}"
+        return hashlib.sha256(content.encode()).hexdigest()
 
     def vector_search(self, query: str, limit: int, document_id: str | None = None, user_id: UUID | None = None) -> list[str]:
         try:
