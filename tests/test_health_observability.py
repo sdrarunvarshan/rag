@@ -192,7 +192,7 @@ def test_health_vs_ready_separation():
     from app.main import app
     
     # Both endpoints should exist
-    routes = [route.path for route in app.routes]
+    routes = app.openapi()["paths"]
     assert "/health" in routes
     assert "/ready" in routes
 
@@ -201,7 +201,7 @@ def test_reconcile_endpoint_exists():
     """Test that Garage reconciliation endpoint exists."""
     from app.main import app
     
-    routes = [route.path for route in app.routes]
+    routes = app.openapi()["paths"]
     assert "/admin/reconcile-garage" in routes
 
 

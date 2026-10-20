@@ -1,145 +1,30 @@
-from __future__ import annotations
+"""Authentication helpers. Implementation lives in app.services.auth_service."""
 
-import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any
-from uuid import UUID
-
-import bcrypt
-import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, EmailStr, Field
-
-from app import db
-from app.config import (
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES,
-    JWT_ALGORITHM,
-    JWT_SECRET_KEY,
+from app.schemas.auth import TokenResponse, UserLogin, UserRegister, UserResponse
+from app.services.auth_service import (
+    create_access_token,
+    decode_access_token,
+    get_current_user,
+    get_optional_user,
+    hash_password,
+    login_user,
+    register_user,
+    security,
+    verify_password,
 )
 
-log = logging.getLogger(__name__)
-
-# HTTPBearer security scheme
-security = HTTPBearer(auto_error=False)
-
-
-class UserRegister(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=6, description="Password must be at least 6 characters")
-    full_name: str | None = None
-
-
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class UserResponse(BaseModel):
-    id: str
-    email: str
-    full_name: str | None = None
-    created_at: str | None = None
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: UserResponse
-
-
-def hash_password(password: str) -> str:
-    pwd_bytes = password.encode("utf-8")
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(pwd_bytes, salt).decode("utf-8")
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    try:
-        return bcrypt.checkpw(
-            plain_password.encode("utf-8"),
-            hashed_password.encode("utf-8"),
-        )
-    except Exception as exc:
-        log.warning("Password verification error: %s", exc)
-        return False
-
-
-def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
-    to_encode = data.copy()
-    now = datetime.now(timezone.utc)
-    if expires_delta:
-        expire = now + expires_delta
-    else:
-        expire = now + timedelta(minutes=JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire, "iat": now})
-    return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
-
-
-def decode_access_token(token: str) -> dict[str, Any]:
-    try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication token has expired",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    except jwt.PyJWTError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Could not validate credentials: {exc}",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-) -> dict[str, Any]:
-    if not credentials or not credentials.credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    payload = decode_access_token(credentials.credentials)
-    user_id_raw = payload.get("sub")
-    if not user_id_raw:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload: missing user ID",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    try:
-        user_uuid = UUID(user_id_raw)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid user ID format in token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    user = db.get_user_by_id(user_uuid)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User account no longer exists",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return user
-
-
-async def get_optional_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-) -> dict[str, Any] | None:
-    if not credentials or not credentials.credentials:
-        return None
-    try:
-        payload = decode_access_token(credentials.credentials)
-        user_id_raw = payload.get("sub")
-        if not user_id_raw:
-            return None
-        return db.get_user_by_id(UUID(user_id_raw))
-    except Exception:
-        return None
+__all__ = [
+    "TokenResponse",
+    "UserLogin",
+    "UserRegister",
+    "UserResponse",
+    "create_access_token",
+    "decode_access_token",
+    "get_current_user",
+    "get_optional_user",
+    "hash_password",
+    "login_user",
+    "register_user",
+    "security",
+    "verify_password",
+]
