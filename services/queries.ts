@@ -1,5 +1,6 @@
 import type { QueryHistoryItem, StreamEvent } from "@/types/query";
 import { apiUrl, authHeaders, readError } from "@/services/api";
+import { consumeSseFrames, flushSseBuffer } from "@/utils/sse";
 
 export async function askQuestion(question: string, documentId?: string): Promise<string> {
   const response = await fetch(apiUrl("/query"), {
@@ -38,15 +39,17 @@ export async function streamQuestion(
     throw new Error("Response body is not readable");
   }
   const decoder = new TextDecoder();
+  let buffer = "";
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    const chunk = decoder.decode(value);
-    for (const line of chunk.split("\n\n")) {
-      if (!line.startsWith("data: ")) continue;
-      onEvent(JSON.parse(line.slice(6)) as StreamEvent);
-    }
+    buffer += decoder.decode(value, { stream: true });
+    const parsed = consumeSseFrames(buffer);
+    buffer = parsed.rest;
+    for (const event of parsed.events) onEvent(event as StreamEvent);
   }
+  buffer += decoder.decode();
+  for (const event of flushSseBuffer(buffer)) onEvent(event as StreamEvent);
 }
 
 export async function listQueryHistory(): Promise<QueryHistoryItem[]> {
