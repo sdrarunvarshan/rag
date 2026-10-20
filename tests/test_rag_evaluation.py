@@ -14,6 +14,8 @@ Run with: pytest tests/test_rag_evaluation.py -v
 
 import pytest
 from deepeval import assert_test
+
+pytestmark = pytest.mark.evaluation
 from deepeval.metrics import (
     FaithfulnessMetric,
     AnswerRelevancyMetric,

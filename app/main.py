@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 
 from app import cache, db
 from app.api.v1.router import build_v1_router
-from app.config import TEMPORAL_HOST, TEMPORAL_NAMESPACE, TEMPORAL_PORT, ensure_data_dirs
+from app.config import TEMPORAL_HOST, TEMPORAL_NAMESPACE, TEMPORAL_PORT, assert_production_secrets, ensure_data_dirs
 from app.core import runtime
 from app.errors import (
     general_exception_handler,
@@ -36,6 +36,7 @@ UI_PAGE = Path(__file__).resolve().parent / "templates" / "index.html"
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    assert_production_secrets()
     ensure_data_dirs()
 
     try:

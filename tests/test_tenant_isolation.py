@@ -6,6 +6,8 @@ These tests verify that users cannot access each other's documents, images, or c
 import pytest
 from uuid import UUID, uuid4
 
+pytestmark = pytest.mark.integration
+
 from app import db
 from app.cache import get_json, set_json, track_cache_key, invalidate_user_cache
 from app.retrieve import retrieve, _cache_key

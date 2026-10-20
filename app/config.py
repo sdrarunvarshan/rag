@@ -55,8 +55,11 @@ GARAGE_SECURE = os.getenv("GARAGE_SECURE", "false").lower() == "true"
 GARAGE_BUCKET = os.getenv("GARAGE_BUCKET", "rag-documents")
 GARAGE_REGION = os.getenv("GARAGE_REGION", "garage")
 
-# JWT Authentication configuration
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "rag-jwt-secret-key-change-in-production-2026")
+# JWT Authentication configuration. Development keeps a local default.
+# Production must set JWT_SECRET_KEY to a non-default value.
+DEFAULT_JWT_SECRET = "rag-jwt-secret-key-change-in-production-2026"
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "" if APP_ENV == "production" else DEFAULT_JWT_SECRET)
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
@@ -74,6 +77,16 @@ TABLE_RERANK_BONUS = float(os.getenv("TABLE_RERANK_BONUS", "0.15"))
 # Upload constraints
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "50"))
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+
+def assert_production_secrets() -> None:
+    """Reject a missing or default JWT secret when the process is production."""
+    if APP_ENV != "production":
+        return
+    if not JWT_SECRET_KEY or JWT_SECRET_KEY == DEFAULT_JWT_SECRET:
+        raise RuntimeError(
+            "APP_ENV=production requires JWT_SECRET_KEY to be set to a non-default value"
+        )
 
 
 def ensure_data_dirs() -> None:

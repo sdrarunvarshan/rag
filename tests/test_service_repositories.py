@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+
+pytestmark = pytest.mark.unit
 from fastapi import HTTPException
 
 from app.schemas.auth import UserLogin, UserRegister

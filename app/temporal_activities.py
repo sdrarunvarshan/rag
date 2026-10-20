@@ -54,23 +54,32 @@ async def parse_pdf_activity(params: dict[str, Any]) -> dict[str, Any]:
         # Clean up temp file
         temp_path.unlink(missing_ok=True)
     
-    # Store images in Garage and collect keys
+    # Store images in Garage and collect keys. A failed upload rolls back keys from this attempt.
     image_keys = []
     image_metadata = []
     doc_uuid = UUID(document_id)
-    
-    for img in images:
-        image_id = img.id or uuid4()
-        # Upload image to Garage with stable key
-        minio_key = upload_image(doc_uuid, img.image_data, img.mime_type, image_id)
-        image_keys.append(minio_key)
-        image_metadata.append({
-            "id": str(image_id),
-            "mime_type": img.mime_type,
-            "page": img.page,
-            "caption": img.caption,
-            "node_id": str(img.node_id) if img.node_id else None,
-        })
+
+    try:
+        for img in images:
+            image_id = img.id or uuid4()
+            minio_key = upload_image(doc_uuid, img.image_data, img.mime_type, image_id)
+            image_keys.append(minio_key)
+            image_metadata.append({
+                "id": str(image_id),
+                "mime_type": img.mime_type,
+                "page": img.page,
+                "caption": img.caption,
+                "node_id": str(img.node_id) if img.node_id else None,
+            })
+    except Exception:
+        from app.garage_client import delete_garage_object
+
+        for key in image_keys:
+            try:
+                delete_garage_object(key)
+            except Exception as cleanup_exc:
+                log.warning("Failed to roll back image %s after parse failure: %s", key, cleanup_exc)
+        raise
     
     nodes_data = [node.as_row() for node in parsed]
     return {
@@ -132,6 +141,31 @@ async def rebuild_index_activity() -> None:
     """Rebuild pgvector and BM25 indexes."""
     log.info("Activity: Rebuilding hybrid index")
     hybrid_index.rebuild()
+
+
+def failed_ingest_cleanup_keys(staging_key: str | None, image_keys: list[str] | None) -> list[str]:
+    """Staging PDF plus extracted images from an ingest that did not finish.
+
+    Successfully stored images are not included unless the caller passes them
+    because the document itself is being rolled back.
+    """
+    keys: list[str] = []
+    if staging_key:
+        keys.append(staging_key)
+    for key in image_keys or []:
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+@activity.defn
+async def delete_partial_document_activity(params: dict[str, Any]) -> None:
+    """Remove a document row created by an ingest that did not finish. Safe to retry."""
+    from app.db import delete_document
+
+    document_id = UUID(params["document_id"])
+    user_id = UUID(params["user_id"])
+    delete_document(document_id, user_id)
 
 
 @activity.defn

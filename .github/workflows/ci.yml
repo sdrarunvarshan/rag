@@ -7,41 +7,60 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  test:
+  unit:
     runs-on: ubuntu-latest
-    
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up uv
       uses: astral-sh/setup-uv@v1
       with:
         version: "latest"
-    
+
     - name: Set up Python
       run: uv python install 3.12
-    
+
     - name: Install dependencies
       run: |
         uv venv
         source .venv/bin/activate
         uv pip install -e ".[dev]"
-    
+
     - name: Set up environment
-      run: |
-        cp .env.example .env
-    
-    - name: Run DeepEval tests
-      run: |
-        source .venv/bin/activate
-        pytest tests/test_rag_evaluation.py -v --tb=short
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-    
-    - name: Run RAGAS evaluation (if HF_TOKEN available)
+      run: cp .env.example .env
+
+    - name: Run deterministic unit tests
       run: |
         source .venv/bin/activate
-        python -c "from app.evaluation import create_sample_evaluation; create_sample_evaluation()"
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        pytest -m unit -q --tb=short
+
+  evaluation:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v1
+      with:
+        version: "latest"
+
+    - name: Set up Python
+      run: uv python install 3.12
+
+    - name: Install dependencies
+      run: |
+        uv venv
+        source .venv/bin/activate
+        uv pip install -e ".[dev]"
+
+    - name: Set up environment
+      run: cp .env.example .env
+
+    - name: Run external RAG evaluation
       if: ${{ secrets.HF_TOKEN != '' }}
+      run: |
+        source .venv/bin/activate
+        pytest -m evaluation -q --tb=short
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}

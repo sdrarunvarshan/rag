@@ -81,9 +81,21 @@ def fetch_nodes_by_ids(ids: list[UUID], user_id: UUID | None = None) -> list[dic
     return [by_id[i] for i in ids if i in by_id]
 
 
-def fetch_node(node_id: UUID) -> dict[str, Any] | None:
+def fetch_node(node_id: UUID, user_id: UUID | None = None) -> dict[str, Any] | None:
+    """Load a node. user_id=None is the legacy unscoped path and must not be used for tenant requests."""
     with connect() as conn:
-        row = conn.execute("SELECT * FROM nodes WHERE id = %s", (node_id,)).fetchone()
+        if user_id:
+            row = conn.execute(
+                """
+                SELECT n.*
+                FROM nodes n
+                INNER JOIN documents d ON n.document_id = d.id
+                WHERE n.id = %s AND d.user_id = %s
+                """,
+                (node_id, user_id),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM nodes WHERE id = %s", (node_id,)).fetchone()
     return dict(row) if row else None
 
 
@@ -91,24 +103,58 @@ def fetch_children(
     parent_id: UUID,
     limit: int = 32,
     node_type: str | None = None,
+    user_id: UUID | None = None,
 ) -> list[dict[str, Any]]:
-    sql = "SELECT * FROM nodes WHERE parent_id = %s"
-    params: list[Any] = [parent_id]
+    if user_id:
+        sql = """
+            SELECT n.*
+            FROM nodes n
+            INNER JOIN documents d ON n.document_id = d.id
+            WHERE n.parent_id = %s AND d.user_id = %s
+        """
+        params: list[Any] = [parent_id, user_id]
+    else:
+        sql = "SELECT * FROM nodes WHERE parent_id = %s"
+        params = [parent_id]
     if node_type:
-        sql += " AND node_type = %s"
+        sql += " AND node_type = %s" if not user_id else " AND n.node_type = %s"
         params.append(node_type)
-    sql += " ORDER BY path NULLS LAST, id LIMIT %s"
+    sql += " ORDER BY path NULLS LAST, id LIMIT %s" if not user_id else " ORDER BY n.path NULLS LAST, n.id LIMIT %s"
     params.append(limit)
     with connect() as conn:
         rows = conn.execute(sql, tuple(params)).fetchall()
     return list(rows)
 
 
-def fetch_siblings(node: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+def fetch_siblings(node: dict[str, Any], limit: int = 8, user_id: UUID | None = None) -> list[dict[str, Any]]:
     node_id = node["id"]
     parent_id = node.get("parent_id")
     with connect() as conn:
-        if parent_id:
+        if user_id and parent_id:
+            rows = conn.execute(
+                """
+                SELECT n.*
+                FROM nodes n
+                INNER JOIN documents d ON n.document_id = d.id
+                WHERE n.parent_id = %s AND n.id <> %s AND d.user_id = %s
+                ORDER BY n.path NULLS LAST, n.id
+                LIMIT %s
+                """,
+                (parent_id, node_id, user_id, limit),
+            ).fetchall()
+        elif user_id:
+            rows = conn.execute(
+                """
+                SELECT n.*
+                FROM nodes n
+                INNER JOIN documents d ON n.document_id = d.id
+                WHERE n.parent_id IS NULL AND n.document_id = %s AND n.id <> %s AND d.user_id = %s
+                ORDER BY n.path NULLS LAST, n.id
+                LIMIT %s
+                """,
+                (node["document_id"], node_id, user_id, limit),
+            ).fetchall()
+        elif parent_id:
             rows = conn.execute(
                 """
                 SELECT * FROM nodes
@@ -131,28 +177,50 @@ def fetch_siblings(node: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]
     return list(rows)
 
 
-def fetch_tables_under(root_ids: list[UUID], limit: int = 24) -> list[dict[str, Any]]:
+def fetch_tables_under(root_ids: list[UUID], limit: int = 24, user_id: UUID | None = None) -> list[dict[str, Any]]:
     if not root_ids:
         return []
     with connect() as conn:
-        rows = conn.execute(
-            """
-            WITH RECURSIVE tree AS (
+        if user_id:
+            rows = conn.execute(
+                """
+                WITH RECURSIVE tree AS (
+                    SELECT n.id, n.document_id, n.parent_id, n.node_type, n.heading, n.text, n.page, n.path, n.search_text
+                    FROM nodes n
+                    INNER JOIN documents d ON n.document_id = d.id
+                    WHERE n.id = ANY(%s) AND d.user_id = %s
+                    UNION
+                    SELECT c.id, c.document_id, c.parent_id, c.node_type, c.heading, c.text, c.page, c.path, c.search_text
+                    FROM nodes c
+                    INNER JOIN tree t ON c.parent_id = t.id AND c.document_id = t.document_id
+                )
                 SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
-                FROM nodes WHERE id = ANY(%s)
-                UNION
-                SELECT n.id, n.document_id, n.parent_id, n.node_type, n.heading, n.text, n.page, n.path, n.search_text
-                FROM nodes n
-                INNER JOIN tree t ON n.parent_id = t.id
-            )
-            SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
-            FROM tree
-            WHERE node_type = 'table'
-            ORDER BY path NULLS LAST, id
-            LIMIT %s
-            """,
-            (root_ids, limit),
-        ).fetchall()
+                FROM tree
+                WHERE node_type = 'table'
+                ORDER BY path NULLS LAST, id
+                LIMIT %s
+                """,
+                (root_ids, user_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                WITH RECURSIVE tree AS (
+                    SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
+                    FROM nodes WHERE id = ANY(%s)
+                    UNION
+                    SELECT n.id, n.document_id, n.parent_id, n.node_type, n.heading, n.text, n.page, n.path, n.search_text
+                    FROM nodes n
+                    INNER JOIN tree t ON n.parent_id = t.id
+                )
+                SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
+                FROM tree
+                WHERE node_type = 'table'
+                ORDER BY path NULLS LAST, id
+                LIMIT %s
+                """,
+                (root_ids, limit),
+            ).fetchall()
     return list(rows)
 
 

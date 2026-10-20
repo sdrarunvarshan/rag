@@ -178,7 +178,7 @@ class HybridIndex:
         ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
         ids: list[str] = []
         
-        # If user_id is provided, fetch the user's document_ids for ownership filtering
+        # user_id=None is the legacy unscoped corpus search. Tenant requests must pass the owner.
         # This applies both for corpus-wide searches AND document-scoped searches
         user_document_ids: set[str] = set()
         if user_id:

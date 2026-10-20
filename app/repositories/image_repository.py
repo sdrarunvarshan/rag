@@ -64,17 +64,30 @@ def fetch_images_by_document(document_id: UUID, user_id: UUID | None = None) -> 
     ]
 
 
-def fetch_images_by_node(node_id: UUID) -> list[dict[str, Any]]:
+def fetch_images_by_node(node_id: UUID, user_id: UUID | None = None) -> list[dict[str, Any]]:
+    """user_id=None is the legacy unscoped path. Tenant retrieval must pass the owner."""
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, document_id, node_id, minio_key, page, caption, mime_type, created_at
-            FROM images
-            WHERE node_id = %s
-            ORDER BY page, created_at
-            """,
-            (node_id,),
-        ).fetchall()
+        if user_id:
+            rows = conn.execute(
+                """
+                SELECT i.id, i.document_id, i.node_id, i.minio_key, i.page, i.caption, i.mime_type, i.created_at
+                FROM images i
+                INNER JOIN documents d ON i.document_id = d.id
+                WHERE i.node_id = %s AND d.user_id = %s
+                ORDER BY i.page, i.created_at
+                """,
+                (node_id, user_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, document_id, node_id, minio_key, page, caption, mime_type, created_at
+                FROM images
+                WHERE node_id = %s
+                ORDER BY page, created_at
+                """,
+                (node_id,),
+            ).fetchall()
     return [
         {
             "id": str(row["id"]),

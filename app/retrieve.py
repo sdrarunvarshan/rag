@@ -52,7 +52,7 @@ def reciprocal_rank_fusion(rank_lists: list[list[str]], k: int = RRF_K) -> list[
     return sorted(scores.items(), key=lambda item: item[1], reverse=True)
 
 
-def _walk_to_section(node: dict[str, Any]) -> dict[str, Any]:
+def _walk_to_section(node: dict[str, Any], user_id: UUID | None = None) -> dict[str, Any]:
     current = node
     seen: set[UUID] = set()
     while current.get("parent_id") and current.get("node_type") != "section":
@@ -60,7 +60,7 @@ def _walk_to_section(node: dict[str, Any]) -> dict[str, Any]:
         if node_id in seen:
             break
         seen.add(node_id)
-        parent = fetch_node(current["parent_id"])
+        parent = fetch_node(current["parent_id"], user_id)
         if parent is None:
             break
         current = parent
@@ -90,15 +90,15 @@ def _briefs(nodes: list[dict[str, Any]], limit: int | None = None) -> list[dict[
     return cleaned
 
 
-def expand_hit(node_id: UUID, plan: dict[str, Any]) -> dict[str, Any] | None:
-    node = fetch_node(node_id)
+def expand_hit(node_id: UUID, plan: dict[str, Any], user_id: UUID | None = None) -> dict[str, Any] | None:
+    node = fetch_node(node_id, user_id)
     if node is None:
         return None
-    parent = _walk_to_section(node)
-    siblings = fetch_siblings(node, MAX_SIBLINGS) if plan.get("include_siblings") else []
+    parent = _walk_to_section(node, user_id)
+    siblings = fetch_siblings(node, MAX_SIBLINGS, user_id) if plan.get("include_siblings") else []
     children: list[dict[str, Any]] = []
     if plan.get("include_children") or plan.get("prefer_tables"):
-        children = fetch_children(node["id"], MAX_CHILDREN)
+        children = fetch_children(node["id"], MAX_CHILDREN, user_id=user_id)
         if plan.get("prefer_tables"):
             children = [child for child in children if child["node_type"] == "table"]
         elif not plan.get("include_children"):
@@ -126,6 +126,7 @@ def retrieve_tables(
     reranked: list[tuple[str, float]],
     expansions: list[dict[str, Any]],
     plan: dict[str, Any],
+    user_id: UUID | None = None,
 ) -> list[dict[str, Any]]:
     table_ids: list[str] = []
     seen: set[str] = set()
@@ -145,14 +146,14 @@ def retrieve_tables(
             rerank_uuids.append(UUID(node_id))
         except ValueError:
             continue
-    for row in fetch_nodes_by_ids(rerank_uuids):
+    for row in fetch_nodes_by_ids(rerank_uuids, user_id):
         add(row)
 
     root_ids = [UUID(item["section_id"]) for item in expansions]
-    for row in fetch_tables_under(root_ids, MAX_TABLES * 2):
+    for row in fetch_tables_under(root_ids, MAX_TABLES * 2, user_id):
         add(row)
 
-    tables = _briefs(fetch_nodes_by_ids([UUID(nid) for nid in table_ids]), MAX_TABLES)
+    tables = _briefs(fetch_nodes_by_ids([UUID(nid) for nid in table_ids], user_id), MAX_TABLES)
     if plan.get("prefer_tables"):
         return tables
     return tables[:MAX_TABLES]
@@ -161,6 +162,7 @@ def retrieve_tables(
 def retrieve_images(
     hit_nodes: list[Any],
     expansions: list[dict[str, Any]],
+    user_id: UUID | None = None,
 ) -> list[dict[str, Any]]:
     node_uuids: list[UUID] = []
     seen_nodes: set[str] = set()
@@ -198,7 +200,7 @@ def retrieve_images(
     images: list[dict[str, Any]] = []
     seen_image_ids: set[str] = set()
     for node_id in node_uuids:
-        for img in fetch_images_by_node(node_id):
+        for img in fetch_images_by_node(node_id, user_id):
             img_id = str(img["id"])
             if img_id not in seen_image_ids:
                 seen_image_ids.add(img_id)
@@ -305,6 +307,8 @@ def organize_context(
 
 
 def retrieve(question: str, document_id: str | None = None, use_cache: bool = True, user_id: UUID | None = None) -> dict[str, Any]:
+    if user_id is None:
+        log.warning("retrieve() without user_id uses the legacy unscoped single-user path")
     key = _cache_key(question, document_id, user_id)
     if use_cache:
         cached = get_json(key)
@@ -324,7 +328,7 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
     for node_id in candidate_ids:
         text = hybrid_index.text_for(node_id)
         if not text:
-            row = fetch_node(UUID(node_id))
+            row = fetch_node(UUID(node_id), user_id)
             text = (row or {}).get("search_text") or ""
         texts.append(text)
     sim_scores = hybrid_index.similarity(question, texts)
@@ -332,7 +336,7 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
     if plan.get("prefer_tables") and reranked:
         rows = {
             str(row["id"]): row
-            for row in fetch_nodes_by_ids([UUID(nid) for nid in candidate_ids])
+            for row in fetch_nodes_by_ids([UUID(nid) for nid in candidate_ids], user_id)
         }
         boosted: list[tuple[str, float]] = []
         for node_id, score in reranked:
@@ -346,7 +350,7 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
     expansions: list[dict[str, Any]] = []
     seen_sections: set[str] = set()
     for node_id, score in reranked:
-        expanded = expand_hit(UUID(node_id), plan)
+        expanded = expand_hit(UUID(node_id), plan, user_id)
         if not expanded:
             continue
         section_id = expanded["section_id"]
@@ -358,8 +362,8 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
         if len(expansions) >= TOP_SECTIONS:
             break
 
-    tables = retrieve_tables(reranked, expansions, plan)
-    images = retrieve_images(reranked, expansions)
+    tables = retrieve_tables(reranked, expansions, plan, user_id)
+    images = retrieve_images(reranked, expansions, user_id)
     packed = organize_context(plan, expansions, tables)
     payload = {
         "cached": False,

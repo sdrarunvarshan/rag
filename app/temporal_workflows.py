@@ -10,6 +10,8 @@ from temporalio import workflow
 
 from app.temporal_activities import (
     cleanup_garage_activity,
+    delete_partial_document_activity,
+    failed_ingest_cleanup_keys,
     generate_answer_activity,
     get_ingest_stats_activity,
     insert_document_activity,
@@ -80,6 +82,12 @@ class GenerateAnswerParams:
 class CleanupIngestParams:
     document_id: str
     garage_keys: list[str]  # Keys to clean up on failure
+
+
+@dataclass
+class DeletePartialDocumentParams:
+    document_id: str
+    user_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +176,8 @@ class IngestWorkflow:
     @workflow.run
     async def run(self, params: IngestParams) -> dict[str, Any]:
         document_id = params.document_id  # Use stable ID from input
+        parsed_data: dict[str, Any] | None = None
+        document_inserted = False
 
         try:
             # Step 1: Parse PDF from durable storage
@@ -191,6 +201,7 @@ class IngestWorkflow:
                 ),
                 start_to_close_timeout=timedelta(seconds=30),
             )
+            document_inserted = True
 
             # Step 3: Insert parsed nodes (idempotent)
             await workflow.execute_activity(
@@ -242,16 +253,34 @@ class IngestWorkflow:
             return stats
 
         except Exception as exc:
-            # Compensation: cleanup on failure
-            log.error(f"Ingest workflow failed for document {document_id}: {exc}")
-            await workflow.execute_activity(
-                cleanup_garage_activity,
-                CleanupIngestParams(
-                    document_id=document_id,
-                    garage_keys=[params.garage_key],
-                ),
-                start_to_close_timeout=timedelta(seconds=30),
-            )
+            # Roll back staging PDF and extracted images. A finished document is not cleaned up here.
+            # If this process dies before the activity returns uploaded keys, or a delete fails,
+            # leftover objects stay for the admin reconcile_garage report. That report does not delete them.
+            log.error("Ingest workflow failed for document %s: %s", document_id, exc)
+            image_keys = (parsed_data or {}).get("image_keys") or []
+            try:
+                await workflow.execute_activity(
+                    cleanup_garage_activity,
+                    CleanupIngestParams(
+                        document_id=document_id,
+                        garage_keys=failed_ingest_cleanup_keys(params.garage_key, image_keys),
+                    ),
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+            except Exception as cleanup_exc:
+                log.warning("Garage compensation failed for document %s: %s", document_id, cleanup_exc)
+            if document_inserted:
+                try:
+                    await workflow.execute_activity(
+                        delete_partial_document_activity,
+                        DeletePartialDocumentParams(
+                            document_id=document_id,
+                            user_id=params.user_id,
+                        ),
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
+                except Exception as cleanup_exc:
+                    log.warning("Partial document cleanup failed for %s: %s", document_id, cleanup_exc)
             raise
 
 
