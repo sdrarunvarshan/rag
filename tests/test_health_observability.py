@@ -14,13 +14,13 @@ def test_health_endpoint_requires_postgres():
     from app.main import app, health
     
     # Test with PostgreSQL up
-    with patch('app.db.ping', return_value=True):
+    with patch('app.repositories.ping', return_value=True):
         response = health()
         assert response["status"] == "healthy"
         assert response["postgres"] is True
     
     # Test with PostgreSQL down
-    with patch('app.db.ping', return_value=False):
+    with patch('app.repositories.ping', return_value=False):
         response = health()
         assert response["status"] == "unhealthy"
         assert response["postgres"] is False
@@ -31,7 +31,7 @@ def test_ready_endpoint_requires_postgres():
     from app.main import app, ready
     
     # All dependencies up
-    with patch('app.db.ping', return_value=True), \
+    with patch('app.repositories.ping', return_value=True), \
          patch('app.cache.ping', return_value=True), \
          patch('app.garage_client.ping', return_value=True):
         response = ready()
@@ -42,7 +42,7 @@ def test_ready_endpoint_requires_postgres():
         assert response["issues"] is None
     
     # PostgreSQL up, optional dependencies down
-    with patch('app.db.ping', return_value=True), \
+    with patch('app.repositories.ping', return_value=True), \
          patch('app.cache.ping', return_value=False), \
          patch('app.garage_client.ping', return_value=False):
         response = ready()
@@ -55,7 +55,7 @@ def test_ready_endpoint_requires_postgres():
         assert "Garage" in str(response["issues"])
     
     # PostgreSQL down - should not be ready
-    with patch('app.db.ping', return_value=False):
+    with patch('app.repositories.ping', return_value=False):
         response = ready()
         assert response["status"] == "not_ready"
         assert response["postgres"] is False

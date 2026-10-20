@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from temporalio import activity
 
-from app.db import insert_document, insert_image, insert_nodes, node_counts, tree_preview
+from app.repositories import insert_document, insert_image, insert_nodes, node_counts, tree_preview
 from app.garage_client import ensure_bucket, upload_image, delete_document_images, get_image_bytes
 from app.ingest import ingest_flow, parse_pdf
 from app.index import hybrid_index
@@ -161,7 +161,7 @@ def failed_ingest_cleanup_keys(staging_key: str | None, image_keys: list[str] | 
 @activity.defn
 async def delete_partial_document_activity(params: dict[str, Any]) -> None:
     """Remove a document row created by an ingest that did not finish. Safe to retry."""
-    from app.db import delete_document
+    from app.repositories import delete_document
 
     document_id = UUID(params["document_id"])
     user_id = UUID(params["user_id"])

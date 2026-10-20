@@ -10,7 +10,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.db import ping
+from app.repositories import ping
 from app.repositories.user_repository import create_user, get_user_by_email, get_user_by_id
 from app.config import (
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES,

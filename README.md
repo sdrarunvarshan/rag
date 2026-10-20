@@ -242,7 +242,7 @@ tests/
 alembic.ini                   Alembic configuration
 ```
 
-The same HTTP routes are mounted at the original paths and under `/api/v1`. Older module paths such as `app.db`, `app.index`, `app.agent`, and `app.my_server` still import the new packages.
+The same HTTP routes are mounted at the original paths and under `/api/v1`. The application now uses `app.repositories` for data access, which provides a clean separation between business logic and database implementation.
 
 ---
 

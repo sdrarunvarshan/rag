@@ -13,7 +13,7 @@ from app.config import (
     GARAGE_ENDPOINT,
     VALKEY_URL,
 )
-from app.db import ensure_database, init_schema, ping as db_ping, resolve_database_url
+from app.repositories import ensure_database, init_schema, ping as db_ping, resolve_database_url
 from app.garage_client import ensure_bucket, ping as garage_ping
 
 print("DATABASE_URL", DATABASE_URL)

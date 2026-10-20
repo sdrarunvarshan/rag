@@ -11,7 +11,7 @@ from uuid import UUID
 from rank_bm25 import BM25Okapi
 
 from app.config import BM25_PATH, ensure_data_dirs
-from app.db import fetch_all_index_rows
+from app.repositories import fetch_all_index_rows
 from app.vector.pgvector_search import get_vector_store
 
 log = logging.getLogger(__name__)
@@ -171,7 +171,7 @@ class HybridIndex:
         # This applies both for corpus-wide searches AND document-scoped searches
         user_document_ids: set[str] = set()
         if user_id:
-            from app.db import connect
+            from app.repositories import connect
             with connect() as conn:
                 rows = conn.execute(
                     "SELECT id FROM documents WHERE user_id = %s",
@@ -205,7 +205,7 @@ class HybridIndex:
     def text_for(self, node_id: str) -> str:
         try:
             uuid = UUID(node_id)
-            from app.db import fetch_node
+            from app.repositories import fetch_node
             node = fetch_node(uuid)
             if node:
                 return node.get("search_text") or node.get("text") or ""

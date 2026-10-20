@@ -20,7 +20,7 @@ from app.config import (
     TOP_K_VECTOR,
     TOP_SECTIONS,
 )
-from app.db import (
+from app.repositories import (
     fetch_children,
     fetch_document,
     fetch_images_by_node,

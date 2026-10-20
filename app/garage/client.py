@@ -302,7 +302,7 @@ def reconcile_garage_objects() -> dict[str, Any]:
     Returns:
         Dictionary with orphaned objects and statistics.
     """
-    from app.db import connect
+    from app.repositories import connect
     
     try:
         client = _get_boto3_client()

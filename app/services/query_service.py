@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from app.config import TEMPORAL_TASK_QUEUE
 from app.core import runtime
-from app.db import ping
+from app.repositories import ping
 from app.langgraph_rag import run_rag_pipeline, stream_rag_pipeline
 from app.repositories.document_repository import document_exists
 from app.repositories.query_history_repository import save_query_history

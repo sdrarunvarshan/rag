@@ -11,7 +11,7 @@ from uuid import UUID
 from sentence_transformers import SentenceTransformer
 
 from app.config import EMBEDDING_MODEL
-from app.db import upsert_embedding, upsert_embeddings_batch, vector_search
+from app.repositories import upsert_embedding, upsert_embeddings_batch, vector_search
 
 log = logging.getLogger(__name__)
 

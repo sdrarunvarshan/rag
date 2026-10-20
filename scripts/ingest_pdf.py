@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config import ensure_data_dirs
-from app.db import init_schema
+from app.repositories import init_schema
 from app.ingest import ingest_pdf
 
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.db import insert_document, insert_image, insert_nodes, node_counts, tree_preview
+from app.repositories import insert_document, insert_image, insert_nodes, node_counts, tree_preview
 from app.garage_client import ensure_bucket, upload_image
 from app.index import hybrid_index
 

@@ -7,7 +7,7 @@ from functools import wraps
 from fastmcp import FastMCP
 from uuid import UUID
 from app.cache import ping as valkey_ping
-from app.db import fetch_document, fetch_images_by_document
+from app.repositories import fetch_document, fetch_images_by_document
 from app.garage.client import ping as garage_ping
 from app.ai.langgraph_rag import run_rag_pipeline
 from app.retrieve import retrieve

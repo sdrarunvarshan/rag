@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from app import cache
-from app.db import ping
+from app.repositories import ping
 from app.garage_client import (
     delete_document_images,
     get_image_bytes,
