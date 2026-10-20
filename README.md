@@ -46,7 +46,7 @@ Documents → Docling → Extracted Images
 ```
 USER QUESTION
        ↓
-Query Understanding                    app/query_understand.py
+Query Understanding                    app/prompt/query_understand.py
        ↓
 Query Type + Scope + Concepts          definition | comparison | numeric | …
        ↓
@@ -54,7 +54,7 @@ Query Type + Scope + Concepts          definition | comparison | numeric | …
 ↓                             ↓
 Dense Retrieval               BM25
 pgvector + sentence-transformers  lexical (rank-bm25)
-app/index.py                   app/index.py
+app/vector/pgvector_search.py  app/bm25/index.py
 └──────────────┬──────────────┘
        ↓
 RRF Fusion                             app/retrieve.py
@@ -73,7 +73,7 @@ Context Organizer                      app/retrieve.py (organize_context)
        ↓
 Structured Context                    labeled blocks within char budget
        ↓
-LangGraph retrieve → generate          app/langgraph_rag.py
+LangGraph retrieve → generate          app/ai/langgraph_rag.py
        ↓
 LangChain + Qwen                       app/llm.py (Hugging Face router, HF_TOKEN)
        ↓
@@ -106,15 +106,15 @@ LangGraph → Retrieval → Qwen
 
 | Stage | What it does | Code |
 |-------|--------------|------|
-| Query Understanding | Classifies query type, scope, concepts; sets expansion flags | `app/query_understand.py` |
-| Dense + BM25 | Parallel vector and lexical search over indexed nodes | `app/index.py` |
+| Query Understanding | Classifies query type, scope, concepts; sets expansion flags | `app/prompt/query_understand.py` |
+| Dense + BM25 | Parallel vector and lexical search over indexed nodes | `app/vector/pgvector_search.py`, `app/bm25/index.py` |
 | RRF Fusion | Reciprocal Rank Fusion merges rank lists | `app/retrieve.py` |
 | Reranker | Re-scores fused candidates with embedding similarity | `app/retrieve.py` |
 | Hierarchical Expansion | Walks hit → parent section; adds siblings and children per plan | `app/retrieve.py` |
 | Table Retrieval | Pulls table nodes from hits and expanded sections | `app/retrieve.py` |
 | Associated Images | Pulls images linked to top hits and expanded sections | `app/retrieve.py` |
 | Context Organizer | Orders blocks (parent / sibling / child / table) into structured context | `app/retrieve.py` |
-| LangGraph | Orchestrates retrieve → generate | `app/langgraph_rag.py` |
+| LangGraph | Orchestrates retrieve → generate | `app/ai/langgraph_rag.py` |
 | LangChain + Qwen | Grounded generation from structured context only | `app/llm.py` |
 
 The web UI and API return a `flow` object with one entry per stage so you can inspect hits, fusion scores, expansions, associated images, and the final context.
@@ -198,46 +198,51 @@ These mechanisms support tenant isolation, but the underlying database queries, 
 
 ```
 app/
-  main.py                 FastAPI routes: /, /health, /documents, /ingest, /query
-  my_server.py            FastMCP server with user-aware and legacy tool sets
-  agent.py                Qwen tool-calling agent with optional user-aware MCP client
-  test_agent.py           Test script for MCP server connectivity
-  ingest.py               Docling PDF → structured nodes + images
-  query_understand.py     Query type, scope, concepts, expansion plan
-  db.py                   Postgres schema and queries (documents, nodes, images)
-  models.py               SQLAlchemy ORM models
-  index.py                pgvector + BM25 index
-  pgvector_search.py      pgvector-based vector search
-  retrieve.py             Hybrid search, RRF, rerank, hierarchy, tables, context, flow
-  langgraph_rag.py        LangGraph retrieve → generate
-  llm.py                  LangChain ChatOpenAI on Hugging Face router (Qwen)
-  cache.py                Valkey
-  config.py               Environment
-  garage_client.py        Garage (S3-compatible) client for image storage
-  telemetry.py            OpenTelemetry instrumentation with Phoenix
-  evaluation.py           RAGAS evaluation metrics
-  temporal_activities.py  Temporal activities for durable execution
-  temporal_workflows.py   Temporal workflows (IngestWorkflow, QueryWorkflow)
-  temporal_worker.py      Temporal worker process
+  main.py                     App startup, middleware, and router mounting
+  api/v1/routers/             HTTP routers: auth, users, roles, documents, queries, ingest, health, admin
+  schemas/                    Request and response models
+  services/                   Use-case logic called by the routers
+  repositories/               SQL access grouped by table
+  models/                     SQLAlchemy models (user, document, node, image, query history)
+  database/                   Database facade used by the rest of the app
+  ai/                         MCP server, tool-calling agent, and LangGraph retrieve → generate
+  prompt/                     Query understanding (type, scope, concepts, expansion plan)
+  vector/                     pgvector search
+  bm25/                       BM25 lexical index
+  garage/                     Garage (S3-compatible) storage client
+  middleware/                 Request IDs, CORS, and upload checks
+  ragas/                      Faithfulness, answer relevancy, contextual metrics, precision, recall, F1
+  deepeval/                   The same quality and retrieval metrics through DeepEval
+  test/                       Local MCP agent connectivity check
+  ingest.py                   Docling PDF → structured nodes + images
+  retrieve.py                 Hybrid search, RRF, rerank, hierarchy, tables, context, flow
+  llm.py                      LangChain ChatOpenAI on the Hugging Face router (Qwen)
+  cache.py                    Valkey
+  config.py                   Environment
+  telemetry.py                OpenTelemetry instrumentation with Phoenix
+  temporal_activities.py      Temporal activities
+  temporal_workflows.py       IngestWorkflow and QueryWorkflow
+  temporal_worker.py          Temporal worker process
 
 alembic/
-  env.py                  Alembic environment configuration
-  script.py.mako          Migration script template
-  versions/               Database migration files
+  env.py                      Alembic environment configuration
+  versions/                   Database migration files
 
 scripts/
-  ingest_pdf.py           CLI ingest
-  check_services.py       Postgres / Valkey / Garage ping
-  start_phoenix.py        Start Phoenix observability server
+  ingest_pdf.py               CLI ingest
+  check_services.py           Postgres / Valkey / Garage ping
+  rebuild_bm25.py             Rebuild the BM25 index
+  start_phoenix.py            Start the Phoenix observability server
 
 tests/
-  test_tenant_isolation.py  Tenant-scoped retrieval, Temporal propagation, BM25 and cache tests
-  test_rag_evaluation.py  DeepEval pytest tests for CI/CD
+  test_tenant_isolation.py    Tenant-scoped retrieval, Temporal propagation, BM25 and cache tests
+  test_rag_evaluation.py      DeepEval pytest tests
 
-.env.example              Copy to .env (never commit .env)
-requirements.txt
-alembic.ini               Alembic configuration
+.env.example                  Copy to .env (never commit .env)
+alembic.ini                   Alembic configuration
 ```
+
+The same HTTP routes are mounted at the original paths and under `/api/v1`. Older module paths such as `app.db`, `app.index`, `app.agent`, and `app.my_server` still import the new packages.
 
 ---
 
@@ -444,7 +449,7 @@ Edit `.env` and set `HF_TOKEN`. **Do not commit `.env`.**
 | `LLM_PRESENCE_PENALTY` | Default `1.5` |
 | `LLM_TOP_K` | Passed as `extra_body.top_k` (default `20`) |
 | `EMBEDDING_MODEL` | Default `sentence-transformers/all-MiniLM-L6-v2` |
-| `MCP_USER_ID` | Optional user UUID used by `app.my_server` when starting in user-aware  mode. If unset, the server uses legacy single-user mode. |
+| `MCP_USER_ID` | Optional user UUID used by `app.ai.my_server` when starting in user-aware mode. If unset, the server uses legacy single-user mode. |
 | `CACHE_TTL_SECONDS` | Default `3600` |
 | `TEMPORAL_HOST` | Temporal server host (default `localhost`) |
 | `TEMPORAL_PORT` | Temporal server port (default `7233`) |
@@ -555,11 +560,15 @@ Without Temporal, the API falls back to direct execution. All functionality rema
 
 ## API
 
+The same paths are also available with an `/api/v1` prefix, for example `POST /api/v1/auth/login`.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/auth/register` | Register a new user |
 | `POST` | `/auth/login` | Login and receive a JWT access token |
 | `GET` | `/auth/me` | Get current authenticated user details (Protected) |
+| `GET` | `/users/me` | Current user profile (Protected) |
+| `GET` | `/roles` | Role catalog: `user` and `admin` (Protected) |
 | `GET` | `/health` | Service health and dependency status, including optional-service   availability |
 | `GET` | `/documents` | Indexed documents (Protected, requires Bearer token) |
 | `DELETE` | `/documents/{document_id}` | Complete deletion from Postgres and Garage (Protected) |
@@ -649,7 +658,7 @@ In user-aware mode, the document tools pass the injected user ID to the existing
 Run the MCP server locally:
 
 ```bash
-uv run python -m app.my_server
+uv run python -m app.ai.my_server
 ```
 
 For user-aware mode, set `MCP_USER_ID` to a valid user UUID in the environment before launching the server.
@@ -658,7 +667,7 @@ For user-aware mode, set `MCP_USER_ID` to a valid user UUID in the environment b
 
 ### AI agent
 
-`app/agent.py` implements an AI agent that connects to the FastMCP server and uses Qwen through the Hugging Face Inference Router for tool calling.
+`app/ai/agent.py` implements an AI agent that connects to the FastMCP server and uses Qwen through the Hugging Face Inference Router for tool calling.
 
 The agent:
 
@@ -692,13 +701,13 @@ When `user_id` is omitted, the agent uses the legacy single-user client.
 Start the agent from the project root:
 
 ```bash
-uv run python -m app.agent
+uv run python -m app.ai.agent
 ```
 
 Enter a question when prompted. To use user-aware mode, pass a valid user UUID as the first command-line argument:
 
 ```bash
-uv run python -m app.agent <USER_UUID>
+uv run python -m app.ai.agent <USER_UUID>
 ```
 
 The command-line argument is suitable for local testing. In a deployed application, pass the authenticated user's ID from the backend rather than accepting an arbitrary user ID from a client.
@@ -706,7 +715,7 @@ The command-line argument is suitable for local testing. In a deployed applicati
 #### Test MCP connectivity
 
 ```bash
-uv run python -m app.test_agent
+uv run python -m app.test.test_agent
 ```
 
 This script can be used to inspect MCP connectivity and available tools.
@@ -740,7 +749,7 @@ Tracing is enabled automatically when the RAG API starts. Phoenix captures:
 ### RAGAS evaluation
 
 ```python
-from app.evaluation import RAGASEvaluator
+from app.ragas.evaluation import RAGASEvaluator
 
 evaluator = RAGASEvaluator()
 
@@ -758,6 +767,9 @@ results = evaluator.evaluate_dataset(
 - **Answer Relevance** — answers address the user's question
 - **Context Precision** — retrieved context is relevant
 - **Context Recall** — all relevant information was retrieved
+- **Precision, recall, and F1** — retrieval-set scores in `app/ragas/retrieval.py`
+
+DeepEval exposes faithfulness, answer relevancy, and contextual relevancy from `app/deepeval/metrics.py`, with the same precision, recall, and F1 scores in `app/deepeval/retrieval.py`.
 
 ### Request correlation and error handling
 
