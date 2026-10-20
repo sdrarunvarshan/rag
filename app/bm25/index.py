@@ -202,11 +202,12 @@ class HybridIndex:
             log.warning("Similarity computation failed: %s", exc)
             return [0.0] * len(texts)
 
-    def text_for(self, node_id: str) -> str:
+    def text_for(self, node_id: str, user_id: UUID | None = None) -> str:
+        """Get text for a node. user_id=None is the legacy unscoped path and must not be used for tenant requests."""
         try:
             uuid = UUID(node_id)
             from app.repositories import fetch_node
-            node = fetch_node(uuid)
+            node = fetch_node(uuid, user_id)
             if node:
                 return node.get("search_text") or node.get("text") or ""
         except Exception as exc:

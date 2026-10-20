@@ -326,7 +326,7 @@ def retrieve(question: str, document_id: str | None = None, use_cache: bool = Tr
 
     texts: list[str] = []
     for node_id in candidate_ids:
-        text = hybrid_index.text_for(node_id)
+        text = hybrid_index.text_for(node_id, user_id)
         if not text:
             row = fetch_node(UUID(node_id), user_id)
             text = (row or {}).get("search_text") or ""
@@ -415,18 +415,18 @@ def build_query_flow(
     user_id: UUID | None = None,
 ) -> dict[str, dict[str, Any]]:
     doc_meta = None
-    counts = node_counts(UUID(document_id) if document_id else None)
+    counts = node_counts(UUID(document_id) if document_id else None, user_id)
     preview: list[dict[str, Any]] = []
     if document_id:
         doc_meta = fetch_document(UUID(document_id), user_id) if user_id else None
         if doc_meta:
-            preview = tree_preview(UUID(document_id), limit=40)
+            preview = tree_preview(UUID(document_id), limit=40, user_id=user_id)
     tree_lines = [
         f"{item.get('path') or '-'} [{item['node_type']}] {item.get('heading') or ''}"
         for item in preview
     ]
-    vector_rows = summarize_nodes(result.get("vector_hits") or [])
-    bm25_rows = summarize_nodes(result.get("bm25_hits") or [])
+    vector_rows = summarize_nodes(result.get("vector_hits") or [], user_id)
+    bm25_rows = summarize_nodes(result.get("bm25_hits") or [], user_id)
     fused_meta = {row["id"]: row for row in vector_rows + bm25_rows}
     fused_rows = []
     for item in result.get("fused") or []:
@@ -436,7 +436,7 @@ def build_query_flow(
     for item in result.get("reranked") or []:
         meta = fused_meta.get(item["id"])
         if not meta:
-            found = summarize_nodes([item["id"]])
+            found = summarize_nodes([item["id"]], user_id)
             meta = found[0] if found else {"id": item["id"]}
         rerank_rows.append({**meta, "score": item.get("score")})
 

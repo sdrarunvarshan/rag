@@ -62,6 +62,7 @@ class GetIngestStatsParams:
     filename: str
     nodes_parsed: int
     images_stored: int = 0
+    user_id: str | None = None
 
 
 @dataclass
@@ -236,6 +237,7 @@ class IngestWorkflow:
                     filename=params.filename,
                     nodes_parsed=parsed_data["nodes_count"],
                     images_stored=parsed_data.get("images_count", 0),
+                    user_id=params.user_id,
                 ),
                 start_to_close_timeout=timedelta(seconds=30),
             )

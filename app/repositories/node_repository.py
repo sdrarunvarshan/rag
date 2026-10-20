@@ -224,36 +224,73 @@ def fetch_tables_under(root_ids: list[UUID], limit: int = 24, user_id: UUID | No
     return list(rows)
 
 
-def fetch_subtree(root_id: UUID) -> list[dict[str, Any]]:
+def fetch_subtree(root_id: UUID, user_id: UUID | None = None) -> list[dict[str, Any]]:
+    """Load a subtree. user_id=None is the legacy unscoped path and must not be used for tenant requests."""
     with connect() as conn:
-        rows = conn.execute(
-            """
-            WITH RECURSIVE tree AS (
+        if user_id:
+            rows = conn.execute(
+                """
+                WITH RECURSIVE tree AS (
+                    SELECT n.id, n.document_id, n.parent_id, n.node_type, n.heading, n.text, n.page, n.path, n.search_text
+                    FROM nodes n
+                    INNER JOIN documents d ON n.document_id = d.id
+                    WHERE n.id = %s AND d.user_id = %s
+                    UNION ALL
+                    SELECT n.id, n.document_id, n.parent_id, n.node_type, n.heading, n.text, n.page, n.path, n.search_text
+                    FROM nodes n
+                    INNER JOIN tree t ON n.parent_id = t.id AND n.document_id = t.document_id
+                    INNER JOIN documents d ON n.document_id = d.id
+                    WHERE d.user_id = %s
+                )
                 SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
-                FROM nodes WHERE id = %s
-                UNION ALL
-                SELECT n.id, n.document_id, n.parent_id, n.node_type, n.heading, n.text, n.page, n.path, n.search_text
-                FROM nodes n
-                INNER JOIN tree t ON n.parent_id = t.id
-            )
-            SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
-            FROM tree
-            ORDER BY path NULLS LAST, id
-            """,
-            (root_id,),
-        ).fetchall()
+                FROM tree
+                ORDER BY path NULLS LAST, id
+                """,
+                (root_id, user_id, user_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                WITH RECURSIVE tree AS (
+                    SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
+                    FROM nodes WHERE id = %s
+                    UNION ALL
+                    SELECT n.id, n.document_id, n.parent_id, n.node_type, n.heading, n.text, n.page, n.path, n.search_text
+                    FROM nodes n
+                    INNER JOIN tree t ON n.parent_id = t.id
+                )
+                SELECT id, document_id, parent_id, node_type, heading, text, page, path, search_text
+                FROM tree
+                ORDER BY path NULLS LAST, id
+                """,
+                (root_id,),
+            ).fetchall()
     return list(rows)
 
 
-def node_counts(document_id: UUID | None = None) -> dict[str, int]:
-    sql = "SELECT node_type, COUNT(*) AS n FROM nodes"
-    params: tuple[Any, ...] = ()
-    if document_id is not None:
-        sql += " WHERE document_id = %s"
-        params = (document_id,)
-    sql += " GROUP BY node_type"
+def node_counts(document_id: UUID | None = None, user_id: UUID | None = None) -> dict[str, int]:
+    """Count nodes by type. user_id=None is the legacy unscoped path and must not be used for tenant requests."""
+    if user_id:
+        sql = """
+        SELECT n.node_type, COUNT(*) AS n
+        FROM nodes n
+        INNER JOIN documents d ON n.document_id = d.id
+        WHERE d.user_id = %s
+        """
+        params: list[Any] = [user_id]
+        if document_id is not None:
+            sql += " AND n.document_id = %s"
+            params.append(document_id)
+        sql += " GROUP BY n.node_type"
+    else:
+        sql = "SELECT node_type, COUNT(*) AS n FROM nodes"
+        params: tuple[Any, ...] = ()
+        if document_id is not None:
+            sql += " WHERE document_id = %s"
+            params = (document_id,)
+        sql += " GROUP BY node_type"
     with connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(sql, tuple(params)).fetchall()
     counts = {"section": 0, "subsection": 0, "table": 0}
     for row in rows:
         counts[str(row["node_type"])] = int(row["n"])
@@ -261,18 +298,32 @@ def node_counts(document_id: UUID | None = None) -> dict[str, int]:
     return counts
 
 
-def tree_preview(document_id: UUID, limit: int = 80) -> list[dict[str, Any]]:
+def tree_preview(document_id: UUID, limit: int = 80, user_id: UUID | None = None) -> list[dict[str, Any]]:
+    """Preview document tree structure. user_id=None is the legacy unscoped path and must not be used for tenant requests."""
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT path, node_type, heading, page
-            FROM nodes
-            WHERE document_id = %s
-            ORDER BY path NULLS LAST, id
-            LIMIT %s
-            """,
-            (document_id, limit),
-        ).fetchall()
+        if user_id:
+            rows = conn.execute(
+                """
+                SELECT n.path, n.node_type, n.heading, n.page
+                FROM nodes n
+                INNER JOIN documents d ON n.document_id = d.id
+                WHERE n.document_id = %s AND d.user_id = %s
+                ORDER BY n.path NULLS LAST, n.id
+                LIMIT %s
+                """,
+                (document_id, user_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT path, node_type, heading, page
+                FROM nodes
+                WHERE document_id = %s
+                ORDER BY path NULLS LAST, id
+                LIMIT %s
+                """,
+                (document_id, limit),
+            ).fetchall()
     return [
         {
             "path": row["path"],
@@ -284,14 +335,15 @@ def tree_preview(document_id: UUID, limit: int = 80) -> list[dict[str, Any]]:
     ]
 
 
-def summarize_nodes(ids: list[str]) -> list[dict[str, Any]]:
+def summarize_nodes(ids: list[str], user_id: UUID | None = None) -> list[dict[str, Any]]:
+    """Summarize nodes by ID. user_id=None is the legacy unscoped path and must not be used for tenant requests."""
     uuids: list[UUID] = []
     for raw in ids:
         try:
             uuids.append(UUID(str(raw)))
         except ValueError:
             continue
-    rows = fetch_nodes_by_ids(uuids)
+    rows = fetch_nodes_by_ids(uuids, user_id)
     return [
         {
             "id": str(row["id"]),

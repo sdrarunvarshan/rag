@@ -192,10 +192,12 @@ async def get_ingest_stats_activity(params: dict[str, Any]) -> dict[str, Any]:
     filename: str = params["filename"]
     nodes_parsed: int = params["nodes_parsed"]
     images_stored: int = params.get("images_stored", 0)
+    user_id_str: str | None = params.get("user_id")
+    user_id = UUID(user_id_str) if user_id_str else None
     log.info(f"Activity: Getting stats for document {document_id}")
     doc_uuid = UUID(document_id)
-    counts = node_counts(doc_uuid)
-    preview = tree_preview(doc_uuid)
+    counts = node_counts(doc_uuid, user_id)
+    preview = tree_preview(doc_uuid, user_id=user_id)
     flow = ingest_flow(filename, counts, preview, nodes_parsed, images_stored)
     return {
         "document_id": document_id,

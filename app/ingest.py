@@ -336,8 +336,8 @@ def ingest_pdf(path: Path, user_id: str, filename: str | None = None) -> dict[st
         images_stored += 1
 
     hybrid_index.rebuild()
-    counts = node_counts(document_id)
-    preview = tree_preview(document_id)
+    counts = node_counts(document_id, user_uuid)
+    preview = tree_preview(document_id, user_id=user_uuid)
     log.info("Ingested %s as %s (%s nodes, %s images)", display_name, document_id, len(parsed), images_stored)
     return {
         "document_id": str(document_id),
