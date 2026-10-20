@@ -10,7 +10,8 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app import db
+from app.db import ping
+from app.repositories.user_repository import create_user, get_user_by_email, get_user_by_id
 from app.config import (
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES,
     JWT_ALGORITHM,
@@ -80,24 +81,24 @@ def to_user_response(user: dict[str, Any]) -> UserResponse:
 
 
 def register_user(body: UserRegister) -> TokenResponse:
-    if not db.ping():
+    if not ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
-    existing = db.get_user_by_email(body.email)
+    existing = get_user_by_email(body.email)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="An account with this email address already exists",
         )
     hashed = hash_password(body.password)
-    user = db.create_user(body.email, hashed, body.full_name)
+    user = create_user(body.email, hashed, body.full_name)
     token = create_access_token({"sub": user["id"], "email": user["email"]})
     return TokenResponse(access_token=token, token_type="bearer", user=to_user_response(user))
 
 
 def login_user(body: UserLogin) -> TokenResponse:
-    if not db.ping():
+    if not ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
-    user = db.get_user_by_email(body.email)
+    user = get_user_by_email(body.email)
     if not user or not verify_password(body.password, user["hashed_password"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -134,7 +135,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user = db.get_user_by_id(user_uuid)
+    user = get_user_by_id(user_uuid)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -155,6 +156,6 @@ async def get_optional_user(
         user_id_raw = payload.get("sub")
         if not user_id_raw:
             return None
-        return db.get_user_by_id(UUID(user_id_raw))
+        return get_user_by_id(UUID(user_id_raw))
     except Exception:
         return None

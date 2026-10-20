@@ -5,19 +5,27 @@ from uuid import UUID
 
 from fastapi import HTTPException
 
-from app import cache, db
+from app import cache
+from app.db import ping
 from app.garage_client import (
     delete_document_images,
     get_image_bytes,
     get_image_url,
 )
 from app.index import hybrid_index
+from app.repositories.document_repository import (
+    delete_document,
+    document_exists,
+    list_documents,
+)
+from app.repositories.image_repository import fetch_image, fetch_images_by_document
+from app.repositories.query_history_repository import delete_query_history, fetch_query_history
 
 log = logging.getLogger(__name__)
 
 
 def require_database() -> None:
-    if not db.ping():
+    if not ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
 
 
@@ -27,13 +35,13 @@ def parse_user_uuid(current_user: dict) -> UUID:
 
 def list_user_documents(current_user: dict) -> dict:
     require_database()
-    items = db.list_documents(parse_user_uuid(current_user))
+    items = list_documents(parse_user_uuid(current_user))
     return {"documents": items}
 
 
 def list_user_query_history(current_user: dict, limit: int = 50) -> dict:
     require_database()
-    history = db.fetch_query_history(parse_user_uuid(current_user), limit=limit)
+    history = fetch_query_history(parse_user_uuid(current_user), limit=limit)
     return {"history": history}
 
 
@@ -44,7 +52,7 @@ def remove_query_history(query_id: str, current_user: dict) -> dict:
         user_uuid = parse_user_uuid(current_user)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid query ID")
-    deleted = db.delete_query_history(query_uuid, user_uuid)
+    deleted = delete_query_history(query_uuid, user_uuid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Query not found or access denied")
     return {"deleted": True}
@@ -57,9 +65,9 @@ def document_images(document_id: str, current_user: dict) -> dict:
         user_uuid = parse_user_uuid(current_user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
-    if not db.document_exists(doc_uuid, user_uuid):
+    if not document_exists(doc_uuid, user_uuid):
         raise HTTPException(status_code=404, detail="document_id not found or access denied")
-    images = db.fetch_images_by_document(doc_uuid, user_uuid)
+    images = fetch_images_by_document(doc_uuid, user_uuid)
     return {"document_id": document_id, "images": images}
 
 
@@ -71,7 +79,7 @@ def load_image(image_id: str, current_user: dict) -> tuple[bytes, str] | str:
         user_uuid = parse_user_uuid(current_user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="image_id must be a UUID") from exc
-    image_meta = db.fetch_image(img_uuid, user_uuid)
+    image_meta = fetch_image(img_uuid, user_uuid)
     if not image_meta:
         raise HTTPException(status_code=404, detail="Image not found or access denied")
     try:
@@ -101,7 +109,7 @@ def delete_document_endpoint(document_id: str, current_user: dict) -> dict:
         user_uuid = parse_user_uuid(current_user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
-    if not db.document_exists(doc_uuid, user_uuid):
+    if not document_exists(doc_uuid, user_uuid):
         raise HTTPException(status_code=404, detail="document_id not found or access denied")
 
     garage_deleted = False
@@ -119,7 +127,7 @@ def delete_document_endpoint(document_id: str, current_user: dict) -> dict:
         errors.append(f"Garage deletion failed: {str(exc)}")
 
     try:
-        deleted = db.delete_document(doc_uuid, user_uuid)
+        deleted = delete_document(doc_uuid, user_uuid)
         if not deleted:
             errors.append("Failed to delete document from database")
         else:

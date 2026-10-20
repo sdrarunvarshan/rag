@@ -7,10 +7,12 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app import db
 from app.config import TEMPORAL_TASK_QUEUE
 from app.core import runtime
+from app.db import ping
 from app.langgraph_rag import run_rag_pipeline, stream_rag_pipeline
+from app.repositories.document_repository import document_exists
+from app.repositories.query_history_repository import save_query_history
 from app.schemas.query import QueryRequest, QueryResponse
 from app.temporal_workflows import QueryParams, QueryWorkflow
 
@@ -25,13 +27,13 @@ def resolved_document_id(document_id: str | None, user_id: str) -> str | None:
         user_uuid = UUID(user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="document_id must be a UUID") from exc
-    if not db.document_exists(doc_uuid, user_uuid):
+    if not document_exists(doc_uuid, user_uuid):
         raise HTTPException(status_code=404, detail="document_id not found or access denied")
     return document_id
 
 
 async def answer_query(request: Request, body: QueryRequest, current_user: dict) -> QueryResponse:
-    if not db.ping():
+    if not ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     resolved_doc_id = resolved_document_id(body.document_id, current_user["id"])
     user_uuid = UUID(current_user["id"])
@@ -62,7 +64,7 @@ async def answer_query(request: Request, body: QueryRequest, current_user: dict)
         packed = run_rag_pipeline(body.question, resolved_doc_id, user_uuid)
 
     try:
-        db.save_query_history(
+        save_query_history(
             user_id=user_uuid,
             question=body.question,
             answer=packed.get("answer"),
@@ -76,7 +78,7 @@ async def answer_query(request: Request, body: QueryRequest, current_user: dict)
 
 
 def stream_query(request: Request, body: QueryRequest, current_user: dict) -> StreamingResponse:
-    if not db.ping():
+    if not ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
     resolved_doc_id = resolved_document_id(body.document_id, current_user["id"])
     user_uuid = UUID(current_user["id"])

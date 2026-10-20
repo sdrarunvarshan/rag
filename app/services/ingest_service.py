@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException, Request, UploadFile
 
-from app import db
+from app.db import ping
 from app.config import MAX_UPLOAD_SIZE_BYTES, TEMPORAL_TASK_QUEUE
 from app.core import runtime
 from app.ingest import ingest_pdf
@@ -25,7 +25,7 @@ async def ingest(
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Upload a PDF file")
 
-    if not db.ping():
+    if not ping():
         raise HTTPException(status_code=503, detail="Postgres is not reachable")
 
     request_id = getattr(request.state, "request_id", "unknown")
