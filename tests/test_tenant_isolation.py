@@ -159,7 +159,7 @@ def test_vector_search_user_isolation(setup_test_documents):
     user2_id = setup_test_documents["user2_id"]
     
     # Mock query embedding
-    query_embedding = [0.1] * 768  # Typical embedding dimension
+    query_embedding = [0.1] * 384  # Matches the nodes.embedding vector(384) column
     
     # Without user_id, searches all nodes (WARNING: not tenant-isolated)
     all_results = db.vector_search(query_embedding, limit=10, document_id=None, user_id=None)

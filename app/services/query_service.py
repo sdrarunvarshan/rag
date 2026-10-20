@@ -87,6 +87,17 @@ def stream_query(request: Request, body: QueryRequest, current_user: dict) -> St
     def event_generator():
         try:
             for event in stream_rag_pipeline(body.question, resolved_doc_id, user_uuid):
+                if event.get("event") == "done":
+                    try:
+                        save_query_history(
+                            user_id=user_uuid,
+                            question=body.question,
+                            answer=event.get("answer"),
+                            document_id=UUID(resolved_doc_id) if resolved_doc_id else None,
+                            sources=event.get("sources"),
+                        )
+                    except Exception as exc:
+                        log.warning("Failed to save streamed query history: %s", exc)
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception:
             log.exception("SSE streaming generation error, request_id=%s", request_id)

@@ -133,6 +133,66 @@ async def test_query_history_is_saved_for_the_authenticated_user(monkeypatch):
     assert saved["question"] == "What is the title?"
 
 
+async def test_completed_stream_is_saved_for_the_authenticated_user(monkeypatch):
+    saved = {}
+    events = [
+        {"event": "retrieved", "sources": [{"id": "n1"}]},
+        {"event": "token", "text": "Your document states "},
+        {
+            "event": "done",
+            "answer": "Your document states that customers can request a refund within 30 days.",
+            "sources": [{"id": "n1", "heading": "Refund policy"}],
+        },
+    ]
+
+    monkeypatch.setattr(query_service, "ping", lambda: True)
+    monkeypatch.setattr(query_service, "document_exists", lambda document_id, user_id: True)
+    monkeypatch.setattr(query_service, "stream_rag_pipeline", lambda *args, **kwargs: iter(events))
+    monkeypatch.setattr(query_service, "save_query_history", lambda **kwargs: saved.update(kwargs) or uuid4())
+
+    request = SimpleNamespace(state=SimpleNamespace(request_id="req-1"))
+    body = QueryRequest(question="What does my PDF say about the refund policy?", document_id=str(OTHER_DOC))
+    response = query_service.stream_query(request, body, _user())
+
+    async for _chunk in response.body_iterator:
+        pass
+
+    assert saved["user_id"] == USER_ID
+    assert saved["question"] == body.question
+    assert saved["document_id"] == OTHER_DOC
+    assert saved["answer"] == events[-1]["answer"]
+    assert saved["sources"] == events[-1]["sources"]
+
+
+async def test_interrupted_stream_is_not_saved(monkeypatch):
+    saved = {"called": False}
+
+    def events(*args, **kwargs):
+        yield {"event": "retrieved", "sources": []}
+        yield {"event": "token", "text": "Your document"}
+        raise RuntimeError("client disconnected")
+
+    monkeypatch.setattr(query_service, "ping", lambda: True)
+    monkeypatch.setattr(query_service, "document_exists", lambda document_id, user_id: True)
+    monkeypatch.setattr(query_service, "stream_rag_pipeline", events)
+    monkeypatch.setattr(
+        query_service,
+        "save_query_history",
+        lambda **kwargs: saved.update(called=True) or uuid4(),
+    )
+
+    request = SimpleNamespace(state=SimpleNamespace(request_id="req-1"))
+    body = QueryRequest(question="What is the refund policy?", document_id=str(OTHER_DOC))
+    response = query_service.stream_query(request, body, _user())
+
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+
+    assert saved["called"] is False
+    assert any('"event": "error"' in chunk for chunk in chunks)
+
+
 def test_query_history_delete_is_scoped_to_the_owner(monkeypatch):
     query_id = uuid4()
     seen = {}

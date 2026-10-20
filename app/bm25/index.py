@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import pickle
 import re
@@ -19,6 +21,20 @@ TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 def tokenize(text: str) -> list[str]:
     return TOKEN_RE.findall((text or "").lower())
+
+
+def corpus_fingerprint(rows: list[dict[str, Any]]) -> str:
+    """Hash the full indexed text so a later edit is not mistaken for an unchanged corpus."""
+    fingerprint_data = [
+        {
+            "id": str(row["id"]),
+            "document_id": str(row["document_id"]),
+            "text": row.get("search_text") or "",
+        }
+        for row in sorted(rows, key=lambda row: (str(row["id"]), str(row["document_id"])))
+    ]
+    content = json.dumps(fingerprint_data, sort_keys=True)
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 class HybridIndex:
@@ -132,35 +148,8 @@ class HybridIndex:
         return hashlib.sha256(content.encode()).hexdigest()
     
     def _get_corpus_fingerprint(self) -> str:
-        """
-        Generate a corpus fingerprint including text content to detect stale indexes.
-        
-        This hashes node IDs, document IDs, and text content to ensure that
-        if any node's text changes, the fingerprint changes and triggers a rebuild.
-        
-        Uses JSON serialization for unambiguous fingerprinting (no delimiter conflicts).
-        """
-        import hashlib
-        import json
-        
-        # Fetch all indexed rows with text content
-        rows = fetch_all_index_rows(user_id=None)
-        
-        # Sort for deterministic hashing
-        sorted_rows = sorted(rows, key=lambda r: (str(r["id"]), str(r["document_id"])))
-        
-        # Build fingerprint using JSON serialization (unambiguous)
-        fingerprint_data = [
-            {
-                "id": str(row["id"]),
-                "document_id": str(row["document_id"]),
-                "text": (row["search_text"] or "")[:100]
-            }
-            for row in sorted_rows
-        ]
-        
-        content = json.dumps(fingerprint_data, sort_keys=True)
-        return hashlib.sha256(content.encode()).hexdigest()
+        """Hash every indexed node's full text so edits past the opening are detected."""
+        return corpus_fingerprint(fetch_all_index_rows(user_id=None))
 
     def vector_search(self, query: str, limit: int, document_id: str | None = None, user_id: UUID | None = None) -> list[str]:
         try:

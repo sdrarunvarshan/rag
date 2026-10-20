@@ -34,6 +34,66 @@ jobs:
         source .venv/bin/activate
         pytest -m unit -q --tb=short
 
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: "1234"
+          POSTGRES_DB: rag
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d rag"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:1234@localhost:5432/rag
+      VALKEY_URL: redis://127.0.0.1:6379/0
+      APP_ENV: development
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v1
+      with:
+        version: "latest"
+
+    - name: Set up Python
+      run: uv python install 3.12
+
+    - name: Install dependencies
+      run: |
+        uv venv
+        source .venv/bin/activate
+        uv pip install -e ".[dev]"
+
+    - name: Set up environment
+      run: cp .env.example .env
+
+    - name: Enable pgvector and apply migrations
+      run: |
+        source .venv/bin/activate
+        python -c "import psycopg; conn = psycopg.connect('postgresql://postgres:1234@localhost:5432/rag', autocommit=True); conn.execute('CREATE EXTENSION IF NOT EXISTS vector'); conn.close()"
+        alembic upgrade head
+
+    - name: Run integration tests
+      run: |
+        source .venv/bin/activate
+        pytest -m integration -q --tb=short
+
   evaluation:
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
