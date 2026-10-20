@@ -16,6 +16,48 @@ A modern Next.js frontend for the Structure-Aware RAG application.
 - **Multi-tenant Support**: User-specific document isolation
 - **Responsive Design**: Clean, modern UI with Tailwind CSS
 
+## Project structure
+
+Next.js route files stay thin. Screens, API calls, and shared types live beside `app/`.
+
+```
+app/                          Next.js App Router
+  page.tsx                    Home
+  login/page.tsx              Login route
+  register/page.tsx           Register route
+  dashboard/page.tsx          Dashboard route
+  layout.tsx                  Root layout
+  globals.css
+
+features/
+  auth/components/            LoginForm, RegisterForm
+  users/components/           UserMenu
+  roles/components/           RoleBadge
+  documents/components/       Dashboard (query, stream, documents, history)
+
+components/
+  home/HomePage.tsx           Landing page
+
+services/                     Backend calls under /api/v1
+  api.ts                      Base URL and auth headers
+  auth.ts                     Login and register
+  users.ts                    Current user
+  roles.ts                    Role catalog
+  documents.ts                List, upload, and delete documents
+  queries.ts                  Ask, stream, and query history
+  health.ts                   Health and readiness
+
+utils/
+  storage.ts                  Token, user, and dark-mode storage
+  export-pdf.ts               Query-history PDF export
+
+types/
+  auth.ts
+  document.ts
+  query.ts
+  role.ts
+```
+
 ## Prerequisites
 
 - Node.js 18+ and npm
@@ -105,7 +147,7 @@ A modern Next.js frontend for the Structure-Aware RAG application.
 
 ## Tech Stack
 
-- **Next.js 15** with App Router
+- **Next.js 16** with App Router
 - **TypeScript** for type safety
 - **Tailwind CSS** for styling
 - **React 19** for UI components
@@ -115,8 +157,10 @@ A modern Next.js frontend for the Structure-Aware RAG application.
 
 The frontend communicates with the backend API using:
 - JWT authentication (Bearer token in Authorization header)
-- RESTful endpoints
+- REST calls under `/api/v1` (`NEXT_PUBLIC_API_URL` is the host, for example `http://localhost:8000`)
 - JSON responses
+
+`services/api.ts` builds those URLs. Feature screens call the service functions instead of calling `fetch` directly.
 
 ## For Interviews
 
@@ -145,8 +189,8 @@ When presenting this project:
    - Note the security fixes (tenant isolation, cache invalidation, etc.)
 
 4. **Show the Code**:
-   - Point out the clean component structure
-   - Explain the API integration
+   - Point out `app/` routes, `features/` screens, `services/`, `utils/`, and `types/`
+   - Explain the API integration through `services/` and `/api/v1`
    - Show the state management
    - Demonstrate error handling
 
