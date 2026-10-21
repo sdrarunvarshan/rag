@@ -1,4 +1,4 @@
-import type { DocumentItem } from "@/types/document";
+import type { DeleteDocumentResponse, DocumentItem } from "@/types/document";
 import { apiUrl, authHeaders, readError } from "@/services/api";
 
 export async function listDocuments(): Promise<DocumentItem[]> {
@@ -25,7 +25,7 @@ export async function uploadDocument(file: File): Promise<void> {
   }
 }
 
-export async function deleteDocument(documentId: string): Promise<void> {
+export async function deleteDocument(documentId: string): Promise<DeleteDocumentResponse> {
   const response = await fetch(apiUrl(`/documents/${documentId}`), {
     method: "DELETE",
     headers: authHeaders(),
@@ -33,4 +33,5 @@ export async function deleteDocument(documentId: string): Promise<void> {
   if (!response.ok) {
     throw new Error(await readError(response, "Delete failed"));
   }
+  return response.json() as Promise<DeleteDocumentResponse>;
 }

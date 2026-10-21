@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { getToken } from "@/utils/storage";
 
@@ -15,17 +15,12 @@ const FEATURES = [
 
 export function HomePage() {
   const router = useRouter();
-  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     if (getToken()) {
       router.push("/dashboard");
-      return;
     }
-    setReady(true);
   }, [router]);
-
-  if (!ready) return null;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">

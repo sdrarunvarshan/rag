@@ -17,12 +17,13 @@ export function UserMenu({ user, darkMode, onToggleDarkMode, onLogout }: UserMen
         onClick={onToggleDarkMode}
         className={`p-2 rounded-lg ${darkMode ? "bg-gray-700 text-yellow-400" : "bg-gray-100 text-gray-600"}`}
         title="Toggle Dark Mode"
+        aria-label="Toggle dark mode"
       >
         {darkMode ? "☀️" : "🌙"}
       </button>
-      <div className="text-right">
+      <div className="text-right hidden sm:block">
         <p className={`text-sm ${darkMode ? "text-gray-300" : "text-gray-600"}`}>{user?.email}</p>
-        <RoleBadge role={user?.role || "user"} />
+        <RoleBadge role={user?.role || "user"} darkMode={darkMode} />
       </div>
       <button onClick={onLogout} className="text-sm text-red-600 hover:text-red-700 font-medium">
         Logout

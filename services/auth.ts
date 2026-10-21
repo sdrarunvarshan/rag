@@ -9,6 +9,9 @@ export async function login(email: string, password: string): Promise<AuthRespon
     body: JSON.stringify({ email, password }),
   });
   if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error("Invalid email or password");
+    }
     throw new Error(await readError(response, "Login failed"));
   }
   const data = (await response.json()) as AuthResponse;
@@ -23,6 +26,9 @@ export async function register(email: string, password: string, fullName?: strin
     body: JSON.stringify({ email, password, full_name: fullName }),
   });
   if (!response.ok) {
+    if (response.status === 409) {
+      throw new Error("Email already registered");
+    }
     throw new Error(await readError(response, "Registration failed"));
   }
   return (await response.json()) as AuthResponse;

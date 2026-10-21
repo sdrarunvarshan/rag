@@ -1,8 +1,8 @@
-import type { QueryHistoryItem, StreamEvent } from "@/types/query";
+import type { QueryHistoryItem, QueryResponse, StreamEvent } from "@/types/query";
 import { apiUrl, authHeaders, readError } from "@/services/api";
 import { consumeSseFrames, flushSseBuffer } from "@/utils/sse";
 
-export async function askQuestion(question: string, documentId?: string): Promise<string> {
+export async function askQuestion(question: string, documentId?: string): Promise<QueryResponse> {
   const response = await fetch(apiUrl("/query"), {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
@@ -14,8 +14,8 @@ export async function askQuestion(question: string, documentId?: string): Promis
   if (!response.ok) {
     throw new Error(await readError(response, "Query failed"));
   }
-  const data = (await response.json()) as { answer?: string };
-  return data.answer || "No answer generated";
+  const data = (await response.json()) as QueryResponse;
+  return data;
 }
 
 export async function streamQuestion(

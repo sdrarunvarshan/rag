@@ -4,6 +4,14 @@ export interface SseEvent {
   answer?: string;
   detail?: string;
   sources?: unknown[];
+  cached?: boolean;
+  query_plan?: Record<string, unknown>;
+  images?: unknown[];
+  structured?: unknown[];
+  context?: string;
+  flow?: Record<string, Record<string, unknown>>;
+  llm_skipped?: boolean;
+  request_id?: string;
 }
 
 export function consumeSseFrames(buffer: string): { events: SseEvent[]; rest: string } {
